@@ -121,6 +121,65 @@ class ExperimentCompilerTests(unittest.TestCase):
         self.assertEqual(compiled.number_of_sequence_steps, 5)
         self.assertTrue(np.all(np.diff(peaks) > 0))
 
+    def test_cosine_square_applies_gain_carrier_and_phase(self) -> None:
+        class CosineSquareProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("drive", ch=3)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=100 * ns,
+                    demod_freq=0,
+                    waveform_ch=3,
+                )
+                self.add_pulse(
+                    "pulse",
+                    gen="drive",
+                    style="cosine_square",
+                    length=100 * ns,
+                    edge_length=20 * ns,
+                    frequency=100e6,
+                    phase=np.pi / 2,
+                    gain=0.02,
+                )
+
+            def _body(self, cfg):
+                self.play("pulse")
+                self.trigger("ro")
+
+        compiled = CosineSquareProgram({}).compile(sample_rate_hz=1e9)
+        waveform_values = compiled.preview(3)[0, :100]
+
+        self.assertEqual(waveform_values[0], 0.0)
+        self.assertAlmostEqual(waveform_values[20], 0.02, places=12)
+        self.assertLessEqual(np.max(np.abs(waveform_values)), 0.02)
+
+    def test_cosine_square_requires_edge_length(self) -> None:
+        class MissingEdgeProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("drive", ch=3)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=100 * ns,
+                    demod_freq=0,
+                    waveform_ch=3,
+                )
+                self.add_pulse(
+                    "pulse",
+                    gen="drive",
+                    style="cosine_square",
+                    length=100 * ns,
+                    frequency=0,
+                )
+
+            def _body(self, cfg):
+                self.play("pulse")
+                self.trigger("ro")
+
+        with self.assertRaisesRegex(ValueError, "edge_length"):
+            MissingEdgeProgram({}).compile(sample_rate_hz=1e9)
+
     def test_t1_uses_fixed_step_length_for_all_delays(self) -> None:
         cfg = {
             "f_res": 50e6,

@@ -10,6 +10,8 @@ from QAWG.awg5200 import (
     TriggerConfig,
     align_channel_envelopes,
     align_channels,
+    cosine_square,
+    cosine_square_ns,
     delay,
     delay_auto,
     gaussian_cosine_ns,
@@ -83,6 +85,32 @@ class WaveformTests(unittest.TestCase):
         self.assertEqual(envelope.size, 250)
         self.assertLess(envelope[0], 0.001)
         self.assertEqual(envelope[125], 0.2)
+
+    def test_cosine_square_has_symmetric_edges_and_flat_top(self) -> None:
+        envelope = cosine_square(
+            number_of_samples=100,
+            sample_rate_hz=1e9,
+            edge_length_s=20e-9,
+            amplitude_volts=0.2,
+        )
+
+        self.assertEqual(envelope[0], 0.0)
+        self.assertEqual(envelope[-1], 0.0)
+        self.assertEqual(envelope[19], 0.2)
+        self.assertTrue(np.all(envelope[20:80] == 0.2))
+        np.testing.assert_allclose(envelope[:20], envelope[-20:][::-1])
+
+    def test_cosine_square_ns_converts_edge_length(self) -> None:
+        envelope = cosine_square_ns(
+            duration_ns=100,
+            sample_rate_hz=2.5e9,
+            edge_length_ns=20,
+            amplitude_volts=0.2,
+        )
+
+        self.assertEqual(envelope.size, 250)
+        self.assertEqual(envelope[0], 0.0)
+        self.assertEqual(envelope[50], 0.2)
 
     def test_marker_bits(self) -> None:
         first = marker_window(2400, 10, 20)

@@ -273,6 +273,23 @@ class AWGAlazarTests(unittest.TestCase):
             experiment.acquire(n_average=8)
             mock_capture.assert_called_once_with(n_average=8)
 
+    def test_acquire_records_returns_time_axis_and_raw_records(self) -> None:
+        experiment = self.make_experiment()
+        records = np.ones((5, 256))
+
+        with patch.object(
+            experiment,
+            "_capture_records",
+            return_value=records,
+        ) as mock_capture:
+            time_s, acquired = experiment.acquire_records(n_average=5)
+
+        mock_capture.assert_called_once_with(n_average=5)
+        self.assertEqual(time_s.shape, (256,))
+        self.assertAlmostEqual(time_s[1], 1e-9)
+        np.testing.assert_array_equal(acquired, records)
+        self.assertIsNot(acquired, records)
+
     def test_capture_diagnostics_reports_adc_resolution_and_offset(self) -> None:
         experiment = self.make_experiment(adc_channel="CHB")
         experiment.last_raw_codes = np.array([[32768, 32784]], dtype=np.uint16)

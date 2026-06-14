@@ -109,6 +109,28 @@ class SpectroscopyProgram(ExperimentProgram):
         self.trigger("ro", trigger_delay=0)
 ```
 
+具有 half-cosine rise、flat top、half-cosine fall 的 pulse 可使用：
+
+```python
+self.add_pulse(
+    "readout",
+    gen="res",
+    style="cosine_square",
+    length=1 * us,
+    edge_length=20 * ns,
+    frequency=250 * MHz,
+    phase=0.0,
+    gain=0.02,
+)
+```
+
+使用者只定義 envelope style 與時間參數。Compiler 會自動完成時間轉換與
+carrier modulation：
+
+```text
+waveform(t) = gain * envelope(t) * sin(2*pi*frequency*t + phase)
+```
+
 ### 3. Compile 與 acquisition
 
 不連接硬體也可以 compile 與預覽 waveform：
@@ -178,6 +200,21 @@ python QAWG\build_demo_notebook.py
 
 這個命令只建立 notebook，不會連接或操作硬體。實際執行 notebook cells
 才會連接 AWG5208 與 ATS9371。
+
+[multiplex.ipynb](multiplex.ipynb) 示範在同一 AWG channel 疊加兩個 readout
+tones，擷取共同的 raw ATS9371 records，再分別 demodulate 每個 frequency。
+Multiplex averaging 使用：
+
+```python
+raw_time_s, records = experiment.acquire_records(n_average=1000)
+```
+
+`n_average` 屬於 acquisition，不是 `AWGAlazar.connect()` 的參數。重新產生
+multiplex notebook：
+
+```powershell
+python QAWG\build_multiplex_notebook.py
+```
 
 ## 測試
 

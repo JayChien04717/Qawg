@@ -23,6 +23,8 @@ from .timeline import (
 from .waveforms import (
     concatenate,
     constant,
+    cosine_square,
+    cosine_square_ns,
     gaussian,
     gaussian_cosine,
     gaussian_cosine_ns,
@@ -56,6 +58,8 @@ __all__ = [
     "channel_names",
     "concatenate",
     "constant",
+    "cosine_square",
+    "cosine_square_ns",
     "delay",
     "delay_auto",
     "gaussian",

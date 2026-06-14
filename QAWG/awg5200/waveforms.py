@@ -131,6 +131,42 @@ def gaussian_square(
     return envelope
 
 
+def cosine_square(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    edge_length_s: float,
+    amplitude_volts: float,
+) -> FloatArray:
+    """Return a flat envelope with symmetric half-cosine edges."""
+    if number_of_samples < 1:
+        raise ValueError("number_of_samples must be positive")
+    if sample_rate_hz <= 0:
+        raise ValueError("sample_rate_hz must be positive")
+    if edge_length_s <= 0:
+        raise ValueError("edge_length_s must be positive")
+
+    edge_samples = int(round(edge_length_s * sample_rate_hz))
+    if edge_samples < 2:
+        raise ValueError("edge_length_s must span at least two samples")
+    if 2 * edge_samples >= number_of_samples:
+        raise ValueError(
+            "waveform must contain a flat top after both cosine edges"
+        )
+
+    edge_phase = np.linspace(
+        0.0,
+        np.pi,
+        edge_samples,
+        endpoint=True,
+        dtype=np.float64,
+    )
+    rise = 0.5 * (1.0 - np.cos(edge_phase))
+    envelope = constant(number_of_samples, amplitude_volts)
+    envelope[:edge_samples] *= rise
+    envelope[-edge_samples:] *= rise[::-1]
+    return envelope
+
+
 def gaussian_cosine(
     number_of_samples: int,
     sample_rate_hz: float,
@@ -197,6 +233,22 @@ def gaussian_square_ns(
     envelope[:edge_samples] *= rising
     envelope[-edge_samples:] *= rising[::-1]
     return envelope
+
+
+def cosine_square_ns(
+    duration_ns: float,
+    sample_rate_hz: float,
+    edge_length_ns: float,
+    amplitude_volts: float,
+) -> FloatArray:
+    """Return a flat pulse with symmetric half-cosine edges."""
+    return cosine_square(
+        number_of_samples=ns_to_samples(duration_ns, sample_rate_hz),
+        sample_rate_hz=sample_rate_hz,
+        edge_length_s=edge_length_ns * 1e-9,
+        amplitude_volts=amplitude_volts,
+    )
+
 
 ###################################################
 def triangle(

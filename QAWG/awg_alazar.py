@@ -603,6 +603,22 @@ class AWGAlazar:
         self.last_records_volts = records
         return records
 
+    def acquire_records(
+        self,
+        n_average: int,
+    ) -> tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+    ]:
+        """Acquire unprocessed voltage records for custom DSP pipelines."""
+        records = self._capture_records(n_average=n_average)
+        time_s = (
+            np.arange(records.shape[1], dtype=np.float64)
+            / self.alazar_sample_rate_hz
+        )
+        self.last_time_s = time_s
+        return time_s, records.copy()
+
     def acquire_decimate(
         self,
         n_average: int,

@@ -12,6 +12,7 @@ import numpy.typing as npt
 from .awg5200.waveforms import (
     MIN_WAVEFORM_SAMPLES,
     constant,
+    cosine_square,
     gaussian,
     gaussian_square,
     modulate_envelope,
@@ -144,6 +145,7 @@ class PulseDefinition:
     gain: ValueExpression
     sigma_s: ValueExpression | None = None
     edge_sigma_s: ValueExpression | None = None
+    edge_length_s: ValueExpression | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,7 @@ class ScheduledPulse:
     gain: float
     sigma_s: float | None
     edge_sigma_s: float | None
+    edge_length_s: float | None
 
 
 @dataclass(frozen=True)
@@ -396,13 +399,20 @@ class ExperimentProgram:
         gain: ValueLike = 1.0,
         sigma: ValueLike | None = None,
         edge_sigma: ValueLike | None = None,
+        edge_length: ValueLike | None = None,
     ) -> None:
         if gen not in self.generators:
             raise KeyError(f"Generator {gen!r} is not declared")
         pulse_style = style.lower()
-        if pulse_style not in {"const", "gaussian", "gaussian_square"}:
+        if pulse_style not in {
+            "const",
+            "gaussian",
+            "gaussian_square",
+            "cosine_square",
+        }:
             raise ValueError(
-                "style must be 'const', 'gaussian', or 'gaussian_square'"
+                "style must be 'const', 'gaussian', 'gaussian_square', "
+                "or 'cosine_square'"
             )
         self.pulses[name] = PulseDefinition(
             name=name,
@@ -415,6 +425,9 @@ class ExperimentProgram:
             sigma_s=None if sigma is None else as_expression(sigma),
             edge_sigma_s=(
                 None if edge_sigma is None else as_expression(edge_sigma)
+            ),
+            edge_length_s=(
+                None if edge_length is None else as_expression(edge_length)
             ),
         )
 
@@ -609,6 +622,11 @@ class ExperimentProgram:
                             if definition.edge_sigma_s is None
                             else definition.edge_sigma_s.resolve(point)
                         ),
+                        edge_length_s=(
+                            None
+                            if definition.edge_length_s is None
+                            else definition.edge_length_s.resolve(point)
+                        ),
                     )
                 )
                 if event.at_s is None:
@@ -680,7 +698,7 @@ class ExperimentProgram:
                 sigma_s,
                 pulse.gain,
             )
-        else:
+        elif style == "gaussian_square":
             sigma_s = pulse.edge_sigma_s
             if sigma_s is None or sigma_s <= 0:
                 raise ValueError(
@@ -696,6 +714,23 @@ class ExperimentProgram:
             except ValueError as exc:
                 raise ValueError(
                     "Gaussian-square pulse is too short for edge_sigma"
+                ) from exc
+        else:
+            edge_length_s = pulse.edge_length_s
+            if edge_length_s is None or edge_length_s <= 0:
+                raise ValueError(
+                    "Cosine-square pulses require edge_length > 0"
+                )
+            try:
+                envelope = cosine_square(
+                    count,
+                    sample_rate_hz,
+                    edge_length_s,
+                    pulse.gain,
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "Cosine-square pulse is too short for edge_length"
                 ) from exc
 
         return modulate_envelope(
