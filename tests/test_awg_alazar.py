@@ -403,9 +403,35 @@ class AWGAlazarTests(unittest.TestCase):
             number_of_steps=2,
             number_of_averages=3,
             filter_type="boxcar",
+            remove_dc_offset=False,
         )
         self.assertEqual(result.raw.shape, (3, 2, 256))
         self.assertEqual(result.shots().shape, (3, 2))
+
+    def test_sequence_dc_offset_is_removed_before_demodulation(self) -> None:
+        experiment = self.make_experiment()
+        time_s = np.arange(256) / experiment.alazar_sample_rate_hz
+        tone = 0.1 * np.cos(2 * np.pi * 50e6 * time_s)
+        records = np.array([tone + 0.02, tone - 0.03])
+
+        with patch.object(
+            experiment,
+            "_capture_records",
+            return_value=records,
+        ):
+            experiment.acquire_sequence_traces(
+                number_of_steps=1,
+                number_of_averages=2,
+                remove_dc_offset=True,
+            )
+
+        corrected = experiment.last_sequence_records_volts
+        self.assertIsNotNone(corrected)
+        np.testing.assert_allclose(
+            np.mean(corrected, axis=2),
+            0.0,
+            atol=1e-15,
+        )
 
     def test_process_multiplex_integrate(self) -> None:
         from QAWG.alazar import AlazarProcessor

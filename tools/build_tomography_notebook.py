@@ -50,9 +50,18 @@ amplitude calibration while keeping the same acquisition and analysis path.
         """
 import numpy as np
 import matplotlib.pyplot as plt
+import importlib
+import inspect
+
+import QAWG.compiler as qawg_compiler
+
+# Notebook kernels cache imported classes. Reload the compiler so newly added
+# pulse styles such as ``exponential`` are visible without a kernel restart.
+qawg_compiler = importlib.reload(qawg_compiler)
 
 from QAWG import AWGAlazar
-from QAWG.awg5200 import delay, gaussian_square_ns, waveform
+from QAWG.compiler import ExperimentProgram, ns, us
+from QAWG.alazar import AlazarProcessor, digital_downconvert
 from QAWG.tomography import (
     coherent_density_matrix,
     heterodyne_ml_density_matrix,
@@ -61,6 +70,15 @@ from QAWG.tomography import (
     temporal_mode_weights,
     wigner_function,
 )
+
+add_pulse_parameters = inspect.signature(
+    ExperimentProgram.add_pulse
+).parameters
+if "decay" not in add_pulse_parameters:
+    raise RuntimeError(
+        "This notebook requires the current QAWG compiler with "
+        "add_pulse(..., decay=...). Restart the kernel and rerun this cell."
+    )
 """
     ),
     markdown("## Hardware and waveform parameters"),
@@ -76,13 +94,11 @@ ADC_CHANNEL = "CHA"
 AWG_SIGNAL_CHANNEL = 3
 AWG_MARKER_CHANNEL = 1
 CHANNEL_AMPLITUDE_VPP = 0.5
-PULSE_SHAPE = "exponential"  # "exponential" or "flat_top"
+PULSE_STYLE = "exponential"  # "exponential" or "gaussian_square"
 PULSE_PEAK_VOLTS = 0.0002
 PULSE_DURATION_NS = 1250
 EDGE_SIGMA_NS = 40
 EMISSION_T1_NS = 250
-AWG_LEADING_DELAY_NS = 500
-AWG_TOTAL_DURATION_NS = 3000
 
 ACQUIRE_WINDOW_NS = 1400
 TRIGGER_DELAY_NS = 0
@@ -99,6 +115,72 @@ WIGNER_LIMIT = 2.0
 WIGNER_POINTS = 81
 
 ALAZAR_TIMEOUT_MS = 60_000
+"""
+    ),
+    markdown("## Declarative tomography program"),
+    code(
+        """
+class TomographyProgram(ExperimentProgram):
+    def _initialize(self, cfg):
+        self.declare_gen(
+            "tomography_signal",
+            ch=cfg["awg_ch"],
+            amplitude_vpp=cfg["channel_amplitude_vpp"],
+        )
+        self.declare_readout(
+            "ro",
+            adc_channel=cfg["adc_channel"],
+            length=cfg["acquire_length"],
+            demod_freq=cfg["frequency"],
+            waveform_ch=cfg["awg_ch"],
+            marker_channel=cfg["marker_ch"],
+            integrate_time=cfg["integrate_time"],
+        )
+
+        pulse_kwargs = {}
+        if cfg["pulse_style"] == "exponential":
+            pulse_kwargs["decay"] = cfg["emission_t1"]
+        elif cfg["pulse_style"] == "gaussian_square":
+            pulse_kwargs["edge_sigma"] = cfg["edge_sigma"]
+        else:
+            raise ValueError(
+                "pulse_style must be 'exponential' or 'gaussian_square'"
+            )
+
+        self.add_pulse(
+            "tomography_pulse",
+            gen="tomography_signal",
+            style=cfg["pulse_style"],
+            length=cfg["pulse_length"],
+            frequency=cfg["frequency"],
+            gain=cfg["pulse_gain"],
+            **pulse_kwargs,
+        )
+
+    def _body(self, cfg):
+        # Marker follows tomography_pulse on waveform_ch.
+        self.play("tomography_pulse", at=0)
+        self.trigger(
+            "ro",
+            trigger_delay=cfg["trigger_delay"],
+        )
+
+
+program_cfg = {
+    "frequency": FC_HZ,
+    "awg_ch": AWG_SIGNAL_CHANNEL,
+    "marker_ch": AWG_MARKER_CHANNEL,
+    "adc_channel": ADC_CHANNEL,
+    "channel_amplitude_vpp": CHANNEL_AMPLITUDE_VPP,
+    "pulse_style": PULSE_STYLE,
+    "pulse_length": PULSE_DURATION_NS * ns,
+    "pulse_gain": PULSE_PEAK_VOLTS,
+    "edge_sigma": EDGE_SIGMA_NS * ns,
+    "emission_t1": EMISSION_T1_NS * ns,
+    "acquire_length": ACQUIRE_WINDOW_NS * ns,
+    "integrate_time": (MODE_STOP_NS - MODE_START_NS) * ns,
+    "trigger_delay": TRIGGER_DELAY_NS * ns,
+}
 """
     ),
     markdown("## Connect and configure"),
@@ -122,61 +204,26 @@ print("ADC channel:", experiment.adc_channel_name)
 print("Record samples:", experiment.acquire_window_cycles)
 """
     ),
-    markdown(
-        """
-## Upload `waveform * fc` and aligned marker
-
-The marker remains active when the analog signal channel is disabled. This
-allows reference and signal records to use identical trigger timing.
-"""
-    ),
+    markdown("## Compile, preview, and upload the program"),
     code(
         """
-if PULSE_SHAPE == "exponential":
-    pulse_samples = experiment.ns2cycles(PULSE_DURATION_NS, inst="dac")
-    pulse_time_ns = (
-        np.arange(pulse_samples) / experiment.awg_sample_rate_hz * 1e9
-    )
-    # Field amplitude decays as exp(-t / (2*T1)); power decays as exp(-t / T1).
-    envelope = PULSE_PEAK_VOLTS * np.exp(
-        -pulse_time_ns / (2.0 * EMISSION_T1_NS)
-    )
-elif PULSE_SHAPE == "flat_top":
-    envelope = gaussian_square_ns(
-        duration_ns=PULSE_DURATION_NS,
-        sample_rate_hz=experiment.awg_sample_rate_hz,
-        edge_sigma_ns=EDGE_SIGMA_NS,
-        amplitude_volts=PULSE_PEAK_VOLTS,
-    )
-else:
-    raise ValueError("PULSE_SHAPE must be 'exponential' or 'flat_top'")
+program = TomographyProgram(program_cfg)
+compiled = program.compile(hardware=experiment)
 
-carrier_waveform = waveform(
-    envelope,
-    fc=FC_HZ,
-    ch=AWG_SIGNAL_CHANNEL,
-    phase_radians=0.0,
-    name="tomography_carrier",
-)
-timeline = delay(AWG_LEADING_DELAY_NS * 1e-9) / carrier_waveform
-uploaded = experiment.awg.upload_timeline(
-    timeline,
-    amplitude_vpp={AWG_SIGNAL_CHANNEL: CHANNEL_AMPLITUDE_VPP},
-    total_duration_s=AWG_TOTAL_DURATION_NS * 1e-9,
-)
-marker_name = experiment.awg.marker(
-    waveform_ch=AWG_SIGNAL_CHANNEL,
-    marker_ch=AWG_MARKER_CHANNEL,
-    marker_number=1,
-    low_volts=0.0,
-    high_volts=1.2,
-    amplitude_vpp=CHANNEL_AMPLITUDE_VPP,
-)
+preview = compiled.preview(AWG_SIGNAL_CHANNEL)[0]
+preview_time_ns = np.arange(preview.size) / AWG_SAMPLE_RATE_HZ * 1e9
+plt.figure(figsize=(11, 3))
+plt.plot(preview_time_ns, preview * 1e3)
+plt.xlabel("AWG sequence time (ns)")
+plt.ylabel("Voltage (mV)")
+plt.title(f"Compiled {PULSE_STYLE} carrier waveform")
+plt.grid(True, alpha=0.3)
+plt.show()
 
-print("Signal asset:", uploaded[AWG_SIGNAL_CHANNEL])
-print("Marker asset:", marker_name)
-print("Pulse shape:", PULSE_SHAPE)
-if PULSE_SHAPE == "exponential":
+sequence_name = compiled.upload()
+print("Sequence:", sequence_name)
+print("Pulse style:", PULSE_STYLE)
+if PULSE_STYLE == "exponential":
     print("Simulated emission T1:", EMISSION_T1_NS, "ns")
 print("AWG error:", experiment.awg.error())
 """
@@ -186,13 +233,37 @@ print("AWG error:", experiment.awg.error())
         """
 # Reference: keep the marker running, disable only the analog carrier output.
 experiment.awg.set_output(AWG_SIGNAL_CHANNEL, False)
-_, reference_baseband = experiment.acquire(NUM_REFERENCE_SHOTS)
-reference_records = experiment.last_records_volts.copy()
+reference_result = compiled.acquire(NUM_REFERENCE_SHOTS)
+reference_records = reference_result.raw[:, 0, :]
 
 # Signal: same waveform and marker timing, analog carrier enabled.
 experiment.awg.set_output(AWG_SIGNAL_CHANNEL, True)
-_, signal_baseband = experiment.acquire(NUM_SIGNAL_SHOTS)
-signal_records = experiment.last_records_volts.copy()
+signal_result = compiled.acquire(NUM_SIGNAL_SHOTS)
+signal_records = signal_result.raw[:, 0, :]
+
+# Tomography starts from unaveraged records and demodulates every shot.
+reference_baseband = digital_downconvert(
+    reference_records,
+    ALAZAR_SAMPLE_RATE_HZ,
+    FC_HZ,
+)
+signal_baseband = digital_downconvert(
+    signal_records,
+    ALAZAR_SAMPLE_RATE_HZ,
+    FC_HZ,
+)
+
+# Suppress the real-signal 2*fc image before temporal-mode projection.
+processor = AlazarProcessor(ALAZAR_SAMPLE_RATE_HZ)
+LOWPASS_CUTOFF_HZ = min(20e6, 0.4 * FC_HZ)
+reference_baseband = processor.apply_butterworth_lpf(
+    reference_baseband,
+    cutoff_hz=LOWPASS_CUTOFF_HZ,
+)
+signal_baseband = processor.apply_butterworth_lpf(
+    signal_baseband,
+    cutoff_hz=LOWPASS_CUTOFF_HZ,
+)
 
 print("Reference baseband:", reference_baseband.shape)
 print("Signal baseband:", signal_baseband.shape)

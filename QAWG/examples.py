@@ -65,6 +65,7 @@ class PulseProbeSpectroscopyProgram(ExperimentProgram):
             frequency=cfg["f_res"],
             phase=cfg.get("res_phase", 0.0),
             gain=cfg["res_gain"],
+            readout=True,
         )
 
     def _body(self, cfg: dict[str, Any]) -> None:
@@ -72,7 +73,7 @@ class PulseProbeSpectroscopyProgram(ExperimentProgram):
         self.play("res_pulse", at=cfg.get("res_start", 0))
         self.trigger(
             "ro",
-            trigger_delay=cfg.get("trigger_delay", 0),
+            trigger_delay=cfg.get("trigger_delay"),
         )
 
 
@@ -103,6 +104,7 @@ class PowerRabiProgram(ExperimentProgram):
             length=cfg["res_len"],
             frequency=cfg["f_res"],
             gain=cfg["res_gain"],
+            readout=True,
         )
 
     def _body(self, cfg: dict[str, Any]) -> None:
@@ -111,7 +113,7 @@ class PowerRabiProgram(ExperimentProgram):
         self.play("res_pulse")
         self.trigger(
             "ro",
-            trigger_delay=cfg.get("trigger_delay", 0),
+            trigger_delay=cfg.get("trigger_delay"),
         )
 
 
@@ -143,6 +145,7 @@ class T1Program(ExperimentProgram):
             length=cfg["res_len"],
             frequency=cfg["f_res"],
             gain=cfg["res_gain"],
+            readout=True,
         )
 
     def _body(self, cfg: dict[str, Any]) -> None:
@@ -151,7 +154,7 @@ class T1Program(ExperimentProgram):
         self.play("res_pulse")
         self.trigger(
             "ro",
-            trigger_delay=cfg.get("trigger_delay", 0),
+            trigger_delay=cfg.get("trigger_delay"),
         )
 
 
@@ -179,6 +182,7 @@ class SingleShotProgram(ExperimentProgram):
             length=cfg["res_len"],
             frequency=cfg["f_res"],
             gain=cfg["res_gain"],
+            readout=True,
         )
 
     def _body(self, cfg: dict[str, Any]) -> None:
@@ -186,5 +190,47 @@ class SingleShotProgram(ExperimentProgram):
         self.play("res_pulse", at=cfg["pi_len"] + cfg.get("readout_delay", 40 * ns))
         self.trigger(
             "ro",
-            trigger_delay=cfg.get("trigger_delay", 0),
+            trigger_delay=cfg.get("trigger_delay"),
+        )
+
+
+class CavityRingdownProgram(ExperimentProgram):
+    """Fill a cavity, then acquire its free ring-down after the drive stops."""
+
+    def _initialize(self, cfg: dict[str, Any]) -> None:
+        self.declare_gen(
+            "cavity_drive",
+            ch=cfg.get("awg_ch", 3),
+            amplitude_vpp=cfg.get("channel_amplitude_vpp", 0.5),
+        )
+        self.declare_readout(
+            "ro",
+            adc_channel=cfg.get("adc_channel", "CHA"),
+            length=cfg["acquire_length"],
+            demod_freq=cfg["frequency"],
+            waveform_ch=cfg.get("awg_ch", 3),
+            marker_channel=cfg.get("marker_ch", 1),
+            integrate_time=cfg.get(
+                "integrate_time",
+                cfg["acquire_length"],
+            ),
+        )
+        self.add_pulse(
+            "cavity_fill",
+            gen="cavity_drive",
+            style=cfg.get("pulse_style", "gaussian_square"),
+            length=cfg["drive_length"],
+            edge_sigma=cfg.get("edge_sigma", 20 * ns),
+            frequency=cfg["frequency"],
+            phase=cfg.get("phase", 0.0),
+            gain=cfg["drive_gain"],
+        )
+
+    def _body(self, cfg: dict[str, Any]) -> None:
+        self.play("cavity_fill", at=0)
+        self.trigger(
+            "ro",
+            trigger_delay=(
+                cfg["drive_length"] + cfg.get("ringdown_guard", 0.0)
+            ),
         )

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from QAWG import (
+    CavityRingdownProgram,
     ExperimentProgram,
     ExperimentResult,
     LinearSweep,
@@ -49,6 +50,60 @@ class DelayProgram(ExperimentProgram):
 
 
 class ExperimentCompilerTests(unittest.TestCase):
+    def test_cavity_ringdown_starts_acquisition_after_drive(self) -> None:
+        cfg = {
+            "frequency": 50e6,
+            "drive_length": 2 * us,
+            "ringdown_guard": 40 * ns,
+            "acquire_length": 1 * us,
+            "drive_gain": 0.02,
+            "edge_sigma": 20 * ns,
+        }
+        compiled = CavityRingdownProgram(cfg).compile(
+            sample_rate_hz=2.5e9
+        )
+
+        self.assertEqual(
+            compiled.trigger_delay_s,
+            cfg["drive_length"] + cfg["ringdown_guard"],
+        )
+        self.assertEqual(compiled.readout.length_s, cfg["acquire_length"])
+        self.assertTrue(np.any(compiled.marker_waveforms[0]))
+        self.assertEqual(compiled.preview(3).shape[0], 1)
+
+    def test_exponential_pulse_uses_energy_lifetime(self) -> None:
+        class ExponentialProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("drive", ch=3)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=200 * ns,
+                    demod_freq=0,
+                    waveform_ch=3,
+                )
+                self.add_pulse(
+                    "decay",
+                    gen="drive",
+                    style="exponential",
+                    length=200 * ns,
+                    decay=100 * ns,
+                    frequency=0,
+                    gain=0.1,
+                )
+
+            def _body(self, cfg):
+                self.play("decay", at=0)
+                self.trigger("ro")
+
+        compiled = ExponentialProgram({}).compile(sample_rate_hz=1e9)
+        waveform = compiled.preview(3)[0]
+        self.assertAlmostEqual(waveform[0], 0.1)
+        self.assertAlmostEqual(
+            waveform[100] / waveform[0],
+            np.exp(-0.5),
+        )
+
     def test_delay_sweep_renders_trace_by_trace_steps(self) -> None:
         compiled = DelayProgram({}).compile(sample_rate_hz=2.5e9)
 
@@ -69,6 +124,151 @@ class ExperimentCompilerTests(unittest.TestCase):
                 expected_marker,
             )
         np.testing.assert_array_equal(np.diff(starts), 100)
+
+    def test_tagged_readout_adds_marker_padding_and_shifts_shot(self) -> None:
+        class TaggedReadoutProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("readout", ch=1)
+                self.declare_gen("control", ch=2)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=200 * ns,
+                    demod_freq=50e6,
+                    waveform_ch=1,
+                    marker_channel=1,
+                    marker_padding=500 * ns,
+                )
+                self.add_pulse(
+                    "control",
+                    gen="control",
+                    style="const",
+                    length=50 * ns,
+                    frequency=0,
+                    gain=0.01,
+                )
+                self.add_pulse(
+                    "readout",
+                    gen="readout",
+                    style="const",
+                    length=200 * ns,
+                    frequency=0,
+                    gain=0.02,
+                    readout=True,
+                )
+
+            def _body(self, cfg):
+                self.play("control", at=0)
+                self.play("readout", at=100 * ns)
+                self.trigger("ro")
+
+        compiled = TaggedReadoutProgram({}).compile(
+            sample_rate_hz=1e9
+        )
+
+        self.assertEqual(compiled.number_of_sequence_steps, 1)
+        self.assertEqual(compiled.trigger_delay_s, 500 * ns)
+        np.testing.assert_allclose(
+            compiled.readout_windows_s[0],
+            [500 * ns, 700 * ns],
+        )
+        readout = compiled.preview(1)[0]
+        control = compiled.preview(2)[0]
+        self.assertEqual(np.flatnonzero(np.abs(readout) > 0)[0], 500)
+        self.assertEqual(np.flatnonzero(np.abs(control) > 0)[0], 400)
+        marker = np.flatnonzero(compiled.marker_waveforms[0])
+        self.assertEqual(marker[0], 0)
+        self.assertEqual(marker[-1] + 1, 1200)
+
+    def test_readout_length_sweep_changes_marker_stop(self) -> None:
+        class TaggedLengthSweepProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("readout", ch=1)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=200 * ns,
+                    demod_freq=50e6,
+                    waveform_ch=1,
+                    marker_channel=1,
+                    marker_padding=500 * ns,
+                )
+                length = self.add_sweep(
+                    "length",
+                    LinearSweep(100 * ns, 200 * ns, 2),
+                )
+                self.add_pulse(
+                    "readout",
+                    gen="readout",
+                    style="const",
+                    length=length,
+                    frequency=0,
+                    gain=0.02,
+                    readout=True,
+                )
+
+            def _body(self, cfg):
+                self.play("readout", at=0)
+                self.trigger("ro")
+
+        compiled = TaggedLengthSweepProgram({}).compile(
+            sample_rate_hz=1e9
+        )
+
+        self.assertEqual(compiled.number_of_sequence_steps, 2)
+        marker_stops = [
+            np.flatnonzero(marker)[-1] + 1
+            for marker in compiled.marker_waveforms
+        ]
+        self.assertEqual(marker_stops, [1100, 1200])
+
+    def test_program_dc_offset_option_is_compiled(self) -> None:
+        program = DelayProgram({})
+        program.REMOVE_DC_OFFSET = True
+        compiled = program.compile(sample_rate_hz=2.5e9)
+        self.assertTrue(compiled.remove_dc_offset)
+
+    def test_tagged_readout_delay_sweep_keeps_relative_timing(self) -> None:
+        class TaggedDelaySweepProgram(ExperimentProgram):
+            def _initialize(self, cfg):
+                self.declare_gen("readout", ch=1)
+                self.declare_readout(
+                    "ro",
+                    adc_channel="CHA",
+                    length=100 * ns,
+                    demod_freq=0,
+                    waveform_ch=1,
+                    marker_channel=1,
+                    marker_padding=500 * ns,
+                )
+                delay = self.add_sweep(
+                    "delay",
+                    LinearSweep(0, 200 * ns, 3),
+                )
+                self.add_pulse(
+                    "readout",
+                    gen="readout",
+                    style="const",
+                    length=100 * ns,
+                    frequency=0,
+                    gain=0.02,
+                    readout=True,
+                )
+                self.delay = delay
+
+            def _body(self, cfg):
+                self.delay_auto(self.delay)
+                self.play("readout")
+                self.trigger("ro")
+
+        compiled = TaggedDelaySweepProgram({}).compile(
+            sample_rate_hz=1e9
+        )
+        starts = [
+            np.flatnonzero(np.abs(trace) > 0)[0]
+            for trace in compiled.preview(1)
+        ]
+        self.assertEqual(starts, [500, 600, 700])
 
     def test_trigger_delay_cannot_change_between_sequence_steps(self) -> None:
         class SweptTriggerDelayProgram(ExperimentProgram):

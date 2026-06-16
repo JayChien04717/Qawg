@@ -9,7 +9,6 @@ ring-down 的測試方法。
 - `QAWG/tomography.py`：temporal mode、IQ calibration、maximum-likelihood
   density matrix 與 Wigner function
 - `tomography.ipynb`：AWG 直接產生測試波形，驗證 AWG-to-Alazar pipeline
-- `cavity_ringdown.ipynb`：3D cavity fill-and-ring-down 測試
 - `QAWG/examples.py`：`CavityRingdownProgram`
 
 ## 1. 量測目標

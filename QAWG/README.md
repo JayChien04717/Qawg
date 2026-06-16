@@ -53,6 +53,7 @@ self.declare_readout(
     length=cfg["ro_len"],
     demod_freq=cfg["f_res"],
     waveform_ch=cfg["res_ch"],
+    marker_padding=500 * ns,
     integrate_time=cfg["integrate_time"],
 )
 ```
@@ -60,15 +61,34 @@ self.declare_readout(
 ATS trigger configuration belongs in the program body:
 
 ```python
-self.trigger(
-    "ro",
-    trigger_delay=cfg["trigger_delay"],
+self.trigger("ro")
+```
+
+Mark the pulse that is measured and demodulated with `readout=True`:
+
+```python
+self.add_pulse(
+    "readout",
+    gen="res",
+    style="const",
+    length=1 * us,
+    frequency=cfg["f_res"],
+    gain=0.02,
+    readout=True,
 )
 ```
 
-The compiler uses `waveform_ch` as the marker reference. It finds that
-channel's active waveform interval and creates a same-length marker waveform
-on `marker_channel`, using the original AWG marker alignment logic.
+For a tagged readout pulse, the compiler creates the marker from that pulse
+only. By default the marker begins `500 ns` before the pulse and ends `500 ns`
+after it. If the pulse starts too early to provide the requested pre-padding,
+the compiler shifts the entire shot later while preserving all relative pulse
+timing. `self.trigger("ro")` then uses the marker padding as the initial ATS
+post-trigger delay. Pass `trigger_delay=...` explicitly after measuring the
+actual hardware time of flight.
+
+Programs without a tagged readout pulse retain the older behavior: the
+compiler uses `waveform_ch` as the marker reference and finds that channel's
+active waveform interval.
 For a marker fixed at the beginning of every sequence step, use
 `marker_length=40 * ns` instead of `waveform_ch`.
 `trigger_delay` configures how long ATS9371 waits after receiving the marker
@@ -171,12 +191,13 @@ class SpectroscopyProgram(ExperimentProgram):
             length=2 * us,
             frequency=cfg["f_res"],
             gain=0.02,
+            readout=True,
         )
 
     def _body(self, cfg):
         self.play("probe", at=0)
         self.play("readout", at=0)
-        self.trigger("ro", trigger_delay=0)
+        self.trigger("ro")
 ```
 
 Compile without hardware to inspect generated assets:
@@ -198,6 +219,16 @@ Compile and bind to an existing `AWGAlazar` instance:
 compiled = program.compile(hardware=experiment)
 result = compiled.acquire(n_average=1000)
 ```
+
+To remove one constant DC offset from every acquired trace before
+downconversion and integration:
+
+```python
+program.REMOVE_DC_OFFSET = True
+compiled = program.compile(hardware=experiment)
+```
+
+This subtracts each trace's full-record mean independently.
 
 ## Relative timing
 
@@ -225,8 +256,8 @@ self.trigger("ro", trigger_delay=650 * ns)
 ```
 
 Here `at` controls pulse placement. The marker follows the active waveform on
-the readout's `waveform_ch`; `trigger_delay` is applied by ATS after receiving
-that marker.
+the tagged readout pulse; marker padding and `trigger_delay` are applied
+relative to that marker.
 
 ## Power Rabi
 
@@ -308,6 +339,8 @@ No automatic average is performed by `shots()`.
 ## Current limits
 
 - Sweeps are compile-time AWG sequence expansion, not FPGA runtime loops.
+- Programs without sweeps still use the same backend as a one-step AWG
+  sequence. This keeps upload, acquisition, and result shapes consistent.
 - The current backend supports one readout named `"ro"`.
 - The compiler produces a hardware-independent plan. Hardware upload and
   acquisition execution are owned by `AWGAlazar`.

@@ -221,13 +221,54 @@ print(
     ),
     markdown(
         """
+## SGS100A microwave LO
+
+Connect to the SGS100A at `192.168.10.90`, set the microwave carrier to
+6 GHz at 0 dBm, route the carrier to the rear `REF/LO OUT` connector, and
+enable the main RF output.
+
+Run this cell before the hardware acquisition sections.
+"""
+    ),
+    code(
+        """
+from QAWG.instrument import RohdeSchwarzSGS100A
+
+SGS100A_ADDRESS = "192.168.10.90"
+LO_FREQUENCY_HZ = 6e9
+LO_POWER_DBM = 0.0
+
+sgs = RohdeSchwarzSGS100A(SGS100A_ADDRESS)
+sgs.frequency = LO_FREQUENCY_HZ
+sgs.power = LO_POWER_DBM
+sgs.IQ_state = "on"
+sgs.pulsemod_state = "off"
+sgs.configure_lo_output(True, mode="LO")
+sgs.on()
+
+print("SGS100A:", sgs.idn())
+print(f"Frequency: {sgs.frequency / 1e9:.9f} GHz")
+print(f"Power: {sgs.power:.3f} dBm")
+print("Main RF output:", sgs.status)
+print("External IQ modulation:", sgs.IQ_state)
+print("Pulse modulation:", sgs.pulsemod_state)
+print("Rear REF/LO output:", sgs.ref_lo_output)
+print("Instrument error:", sgs.check_error())
+"""
+    ),
+    markdown(
+        """
 ## Hardware TOF loopback test
 
-Connect the selected AWG output directly to the selected ATS9371 input.
+Connect the selected AWG analog output to the SGS100A I input and route the
+SGS100A RF output through the mixer to the selected ATS9371 input.
 
 The Gaussian-square pulse and Alazar marker are both scheduled at `t=0`.
 Therefore the measured pulse arrival time is the total loopback time of flight
 through the AWG output path, cable, and ATS acquisition path.
+
+The analog I waveform and marker may share the same AWG channel. The marker
+uses marker bits embedded in that channel's waveform data.
 
 Run the following three cells in order.
 """
@@ -251,6 +292,7 @@ class TOFProgram(ExperimentProgram):
             demod_freq=cfg["frequency"],
             waveform_ch=cfg["awg_ch"],
             marker_channel=cfg["marker_ch"],
+            marker_padding=cfg["marker_padding"],
             integrate_time=cfg["integrate_time"],
         )
         self.add_pulse(
@@ -261,10 +303,11 @@ class TOFProgram(ExperimentProgram):
             edge_sigma=cfg["edge_sigma"],
             frequency=cfg["frequency"],
             gain=cfg["pulse_gain"],
+            readout=True,
         )
 
     def _body(self, cfg):
-        # The marker is derived from tof_pulse on waveform_ch.
+        # The compiler shifts this tagged readout pulse when pre-padding is needed.
         self.play("tof_pulse", at=0)
         self.trigger(
             "ro",
@@ -276,20 +319,24 @@ class TOFProgram(ExperimentProgram):
         """
 from QAWG import AWGAlazar, MHz, ns, us
 
-# Physical loopback:
-# AWG channel 3 analog output -> ATS9371 CHB input
-# AWG marker channel 1 marker 1 -> ATS9371 external trigger
+# Physical wiring:
+# AWG channel 1 analog output -> SGS100A I input
+# SGS100A RF output -> mixer RF input -> ATS9371 CHB input
+# SGS100A rear LO output -> mixer LO input
+# AWG channel 1 marker 1 -> ATS9371 external trigger
 tof_cfg = {
-    "awg_ch": 3,
+    "awg_ch": 1,
     "marker_ch": 1,
     "adc_channel": "CHB",
     "channel_amplitude_vpp": 0.5,
     "frequency": 50 * MHz,
     "pulse_length": 600 * ns,
+    "marker_padding": 500 * ns,
     "edge_sigma": 20 * ns,
     "pulse_gain": 0.02,
     "acquire_length": 1.5 * us,
-    "trigger_delay": 0,
+    # Initial ATS post-trigger delay. Adjust after measuring the residual TOF.
+    "trigger_delay": 500 * ns,
     "integrate_time": 1 * us,
 }
 
@@ -306,109 +353,33 @@ experiment = AWGAlazar.connect(
 )
 
 tof_program = TOFProgram(tof_cfg, final_delay_s=1 * us)
+tof_program.REMOVE_DC_OFFSET = True
 tof_compiled = tof_program.compile(hardware=experiment)
+
+if tof_cfg["awg_ch"] == tof_cfg["marker_ch"]:
+    print(
+        "Analog I and trigger marker share AWG "
+        f"CH{tof_cfg['awg_ch']} (supported)."
+    )
+
+marker_samples = np.flatnonzero(tof_compiled.marker_waveforms[0])
+marker_start_ns = marker_samples[0] / experiment.awg_sample_rate_hz / ns
+marker_stop_ns = (marker_samples[-1] + 1) / experiment.awg_sample_rate_hz / ns
 
 print("Sequence steps:", tof_compiled.number_of_sequence_steps)
 print("AWG step duration (us):", tof_compiled.step_duration_s / us)
-print("ATS trigger delay: 0 ns")
+print(f"Analog channel: CH{tof_cfg['awg_ch']}")
+print(f"Trigger marker: CH{tof_cfg['marker_ch']} Marker 1")
+print(f"Compiled marker window: {marker_start_ns:.3f} to {marker_stop_ns:.3f} ns")
+print("Initial ATS post-trigger delay:", tof_cfg["trigger_delay"] / ns, "ns")
 """
     ),
     code(
         """
-import numpy as np
-import matplotlib.pyplot as plt
+from QAWG import calculate_window
 
 tof_result = tof_compiled.acquire(n_average=TOF_N_AVERAGE)
-
-raw_average_mv = tof_result.trace_average("ro")[0] * 1e3
-iq_envelope_mv = np.abs(tof_result.iq_trace_average("ro")[0]) * 1e3
-raw_time_ns = tof_result.raw_time_s / ns
-iq_time_ns = tof_result.iq_time_s / ns
-
-awg_start_ns = -tof_cfg["trigger_delay"] / ns
-awg_stop_ns = awg_start_ns + tof_cfg["pulse_length"] / ns
-integration_start_ns = 0.0
-integration_stop_ns = tof_cfg["integrate_time"] / ns
-
-# Estimate arrival from the IQ envelope's rising half-height crossing.
-baseline_samples = max(1, int(0.1 * iq_envelope_mv.size))
-baseline_mv = np.median(iq_envelope_mv[:baseline_samples])
-peak_mv = np.percentile(iq_envelope_mv, 95)
-half_height_mv = baseline_mv + 0.5 * (peak_mv - baseline_mv)
-crossings = np.flatnonzero(iq_envelope_mv >= half_height_mv)
-
-if crossings.size:
-    right = crossings[0]
-    if right == 0:
-        tof_ns = iq_time_ns[0]
-    else:
-        left = right - 1
-        y0, y1 = iq_envelope_mv[left], iq_envelope_mv[right]
-        fraction = (
-            0.0 if y1 == y0
-            else (half_height_mv - y0) / (y1 - y0)
-        )
-        tof_ns = iq_time_ns[left] + fraction * (
-            iq_time_ns[right] - iq_time_ns[left]
-        )
-    print(f"Estimated loopback TOF: {tof_ns:.3f} ns")
-else:
-    tof_ns = np.nan
-    print("No pulse crossing found. Check loopback wiring and signal level.")
-
-fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-axes[0].plot(raw_time_ns, raw_average_mv)
-for axis in axes:
-    axis.axvspan(
-        awg_start_ns,
-        awg_stop_ns,
-        facecolor="tab:green",
-        alpha=0.10,
-        edgecolor="tab:green",
-        linewidth=2,
-        label=f"AWG waveform ({awg_stop_ns - awg_start_ns:.0f} ns)",
-    )
-    axis.axvspan(
-        integration_start_ns,
-        integration_stop_ns,
-        facecolor="none",
-        edgecolor="tab:orange",
-        linewidth=2,
-        hatch="//",
-        label=(
-            "Integration window "
-            f"({integration_stop_ns - integration_start_ns:.0f} ns)"
-        ),
-    )
-axes[0].set_ylabel("ADC voltage (mV)")
-axes[0].set_title(
-    f"TOF raw average ({TOF_N_AVERAGE} traces, trigger at 0 ns)"
-)
-axes[0].grid(True, alpha=0.3)
-axes[0].legend()
-
-axes[1].plot(iq_time_ns, iq_envelope_mv, label="|IQ|")
-axes[1].axhline(
-    half_height_mv,
-    color="tab:orange",
-    linestyle="--",
-    label="Half height",
-)
-if np.isfinite(tof_ns):
-    axes[1].axvline(
-        tof_ns,
-        color="tab:red",
-        linestyle="--",
-        label=f"TOF = {tof_ns:.3f} ns",
-    )
-axes[1].set_xlabel("Time after ATS trigger (ns)")
-axes[1].set_ylabel("|IQ| (mV)")
-axes[1].set_title("Demodulated Gaussian-square envelope")
-axes[1].grid(True, alpha=0.3)
-axes[1].legend()
-
-plt.tight_layout()
-plt.show()
+window = calculate_window(tof_result)
 """
     ),
     markdown(
@@ -442,6 +413,7 @@ class LengthSweepProgram(ExperimentProgram):
             demod_freq=cfg["frequency"],
             waveform_ch=cfg["awg_ch"],
             marker_channel=cfg["marker_ch"],
+            marker_padding=cfg["marker_padding"],
             integrate_time=cfg["integrate_time"],
         )
         pulse_length = self.add_sweep(
@@ -460,6 +432,7 @@ class LengthSweepProgram(ExperimentProgram):
             edge_sigma=cfg["edge_sigma"],
             frequency=cfg["frequency"],
             gain=cfg["pulse_gain"],
+            readout=True,
         )
 
     def _body(self, cfg):
@@ -600,6 +573,8 @@ class DelayAutoSweepProgram(ExperimentProgram):
 delay_sweep_cfg = {
     **tof_cfg,
     "marker_length": 40 * ns,
+    # Keep acquisition fixed at the marker edge so the pulse delay remains visible.
+    "trigger_delay": 0 * ns,
     "delay_start": 0 * ns,
     "delay_stop": 200 * ns,
     "delay_steps": 6,
@@ -694,6 +669,7 @@ class PhaseSingleShotProgram(ExperimentProgram):
             demod_freq=cfg["frequency"],
             waveform_ch=cfg["readout_ch"],
             marker_channel=cfg["marker_ch"],
+            marker_padding=cfg["marker_padding"],
             integrate_time=cfg["readout_length"],
         )
         phase = self.add_sweep(
@@ -708,6 +684,7 @@ class PhaseSingleShotProgram(ExperimentProgram):
             frequency=cfg["frequency"],
             phase=phase,
             gain=cfg["readout_gain"],
+            readout=True,
         )
 
     def _body(self, cfg):
@@ -728,6 +705,7 @@ phase_single_shot_cfg = {
     "frequency": tof_cfg["frequency"],
     "readout_length": 1 * us,
     "readout_gain": tof_cfg["pulse_gain"],
+    "marker_padding": tof_cfg["marker_padding"],
     "trigger_delay": tof_cfg["trigger_delay"],
 }
 SINGLE_SHOT_N_AVERAGE = 1000
@@ -866,6 +844,21 @@ axes[1].legend()
 
 plt.tight_layout()
 plt.show()
+"""
+    ),
+    markdown("## Close hardware sessions"),
+    code(
+        """
+# Turn off microwave power before closing instrument sessions.
+if "sgs" in globals():
+    sgs.off()
+    sgs.configure_lo_output(False)
+    sgs.close()
+    print("SGS100A RF and rear LO outputs disabled")
+
+if "experiment" in globals():
+    experiment.close()
+    print("AWG VISA session closed")
 """
     ),
 ]

@@ -515,6 +515,11 @@ class AWGAlazar:
             number_of_steps=compiled.number_of_sequence_steps,
             number_of_averages=n_average,
             filter_type=filter_type,
+            remove_dc_offset=getattr(
+                compiled,
+                "remove_dc_offset",
+                False,
+            ),
         )
         raw = self.last_sequence_records_volts
         iq_traces = self.last_sequence_shot_iq
@@ -529,6 +534,20 @@ class AWGAlazar:
             iq_traces[:, :, integrate_start:integrate_stop],
             axis=2,
         )
+        marker_waveforms = getattr(compiled, "marker_waveforms", None)
+        marker_windows_s = None
+        if marker_waveforms is not None:
+            marker_windows_s = np.zeros(
+                (compiled.number_of_sequence_steps, 2),
+                dtype=np.float64,
+            )
+            for step_index, marker in enumerate(marker_waveforms):
+                active = np.flatnonzero(marker)
+                if active.size:
+                    marker_windows_s[step_index] = (
+                        active[0] / compiled.sample_rate_hz,
+                        (active[-1] + 1) / compiled.sample_rate_hz,
+                    )
         return ExperimentResult(
             axes={
                 name: values.copy()
@@ -541,6 +560,19 @@ class AWGAlazar:
             raw_time_s=raw_time_s,
             iq_time_s=iq_time_s,
             readout_name=compiled.readout.name,
+            initial_trigger_delay_s=compiled.trigger_delay_s,
+            readout_windows_s=(
+                None
+                if not hasattr(compiled, "readout_windows_s")
+                else compiled.readout_windows_s.copy()
+            ),
+            marker_windows_s=marker_windows_s,
+            acquire_window_s=self.acquire_window_ns * 1e-9,
+            remove_dc_offset=getattr(
+                compiled,
+                "remove_dc_offset",
+                False,
+            ),
         )
 
     def _acquisition_config(self, n_average: int) -> AcquisitionConfig:
@@ -677,6 +709,7 @@ class AWGAlazar:
         number_of_steps: int,
         number_of_averages: int,
         filter_type: str = "boxcar",
+        remove_dc_offset: bool = False,
     ) -> tuple[
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
@@ -690,6 +723,12 @@ class AWGAlazar:
             raise ValueError("number_of_steps and number_of_averages must be positive")
 
         records = self._capture_records(n_average=steps * averages)
+        if remove_dc_offset:
+            records = records - np.mean(
+                records,
+                axis=1,
+                keepdims=True,
+            )
         sequence_records = records.reshape(
             averages,
             steps,

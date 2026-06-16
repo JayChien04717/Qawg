@@ -12,6 +12,7 @@ from .compiler import (
     us,
 )
 from .examples import (
+    CavityRingdownProgram,
     PowerRabiProgram,
     PulseProbeSpectroscopyProgram,
     SingleShotProgram,
@@ -19,6 +20,7 @@ from .examples import (
 )
 from .awg_alazar import AWGAlazar
 from .awg5200 import AWG5208
+from .analysis import WindowAnalysis, calculate_window
 from .tomography import (
     calibrate_iq_samples,
     coherent_density_matrix,
@@ -31,6 +33,7 @@ from .tomography import (
 
 __all__ = [
     "CompiledExperiment",
+    "CavityRingdownProgram",
     "AWG5208",
     "AWGAlazar",
     "ExperimentProgram",
@@ -43,7 +46,9 @@ __all__ = [
     "SweepRef",
     "T1Program",
     "ValuesSweep",
+    "WindowAnalysis",
     "calibrate_iq_samples",
+    "calculate_window",
     "coherent_density_matrix",
     "heterodyne_ml_density_matrix",
     "normalize_heterodyne_reference",

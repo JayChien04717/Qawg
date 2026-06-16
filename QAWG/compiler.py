@@ -129,6 +129,7 @@ class ReadoutDeclaration:
     marker_channel: int
     marker_number: int = 1
     marker_length_s: float | None = None
+    marker_padding_s: float = 500 * ns
     marker_low_volts: float = 0.0
     marker_high_volts: float = 1.2
     integrate_time_s: float | None = None
@@ -146,6 +147,8 @@ class PulseDefinition:
     sigma_s: ValueExpression | None = None
     edge_sigma_s: ValueExpression | None = None
     edge_length_s: ValueExpression | None = None
+    decay_s: ValueExpression | None = None
+    is_readout: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,7 +166,7 @@ class DelayEvent:
 @dataclass(frozen=True)
 class TriggerEvent:
     readout_name: str
-    trigger_delay_s: ValueExpression
+    trigger_delay_s: ValueExpression | None
 
 
 ProgramEvent = Union[PlayEvent, DelayEvent, TriggerEvent]
@@ -180,6 +183,7 @@ class ScheduledPulse:
     sigma_s: float | None
     edge_sigma_s: float | None
     edge_length_s: float | None
+    decay_s: float | None
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,11 @@ class ExperimentResult:
     raw_time_s: npt.NDArray[np.float64]
     iq_time_s: npt.NDArray[np.float64]
     readout_name: str = "ro"
+    initial_trigger_delay_s: float | None = None
+    readout_windows_s: npt.NDArray[np.float64] | None = None
+    marker_windows_s: npt.NDArray[np.float64] | None = None
+    acquire_window_s: float | None = None
+    remove_dc_offset: bool = False
 
     def _check_readout(self, readout: str) -> None:
         if readout != self.readout_name:
@@ -242,9 +251,11 @@ class CompiledExperiment:
     point_coordinates: tuple[dict[str, Any], ...]
     channel_waveforms: dict[int, npt.NDArray[np.float64]]
     marker_waveforms: npt.NDArray[np.bool_]
+    readout_windows_s: npt.NDArray[np.float64]
     readout: ReadoutDeclaration
     trigger_delay_s: float
     channel_amplitudes_vpp: dict[int, float]
+    remove_dc_offset: bool = False
     _hardware: Any | None = None
 
     @property
@@ -290,6 +301,8 @@ class CompiledExperiment:
 
 class ExperimentProgram:
     """Declarative program compiled into an AWG sequence and ATS record plan."""
+
+    REMOVE_DC_OFFSET = False
 
     def __init__(
         self,
@@ -339,6 +352,7 @@ class ExperimentProgram:
         marker_channel: int = 1,
         marker_number: int = 1,
         marker_length: float | None = None,
+        marker_padding: float = 500 * ns,
         integrate_time: float | None = None,
     ) -> None:
         if name != "ro":
@@ -359,6 +373,8 @@ class ExperimentProgram:
             raise ValueError("Use waveform_ch or marker_length, not both")
         if marker_length is not None and marker_length <= 0:
             raise ValueError("Readout marker_length must be positive")
+        if marker_padding < 0:
+            raise ValueError("Readout marker_padding cannot be negative")
         self.readouts[name] = ReadoutDeclaration(
             name=name,
             adc_channel=adc_channel,
@@ -372,6 +388,7 @@ class ExperimentProgram:
             marker_length_s=(
                 None if marker_length is None else float(marker_length)
             ),
+            marker_padding_s=float(marker_padding),
             integrate_time_s=(
                 None if integrate_time is None else float(integrate_time)
             ),
@@ -400,6 +417,8 @@ class ExperimentProgram:
         sigma: ValueLike | None = None,
         edge_sigma: ValueLike | None = None,
         edge_length: ValueLike | None = None,
+        decay: ValueLike | None = None,
+        readout: bool = False,
     ) -> None:
         if gen not in self.generators:
             raise KeyError(f"Generator {gen!r} is not declared")
@@ -409,10 +428,11 @@ class ExperimentProgram:
             "gaussian",
             "gaussian_square",
             "cosine_square",
+            "exponential",
         }:
             raise ValueError(
                 "style must be 'const', 'gaussian', 'gaussian_square', "
-                "or 'cosine_square'"
+                "'cosine_square', or 'exponential'"
             )
         self.pulses[name] = PulseDefinition(
             name=name,
@@ -429,6 +449,8 @@ class ExperimentProgram:
             edge_length_s=(
                 None if edge_length is None else as_expression(edge_length)
             ),
+            decay_s=None if decay is None else as_expression(decay),
+            is_readout=bool(readout),
         )
 
     def play(
@@ -457,14 +479,18 @@ class ExperimentProgram:
         self,
         readout: str = "ro",
         *,
-        trigger_delay: ValueLike = 0.0,
+        trigger_delay: ValueLike | None = None,
     ) -> None:
         if readout not in self.readouts:
             raise KeyError(f"Readout {readout!r} is not declared")
         self.events.append(
             TriggerEvent(
                 readout_name=readout,
-                trigger_delay_s=as_expression(trigger_delay),
+                trigger_delay_s=(
+                    None
+                    if trigger_delay is None
+                    else as_expression(trigger_delay)
+                ),
             )
         )
 
@@ -484,6 +510,20 @@ class ExperimentProgram:
             raise ValueError("sample_rate_hz must be positive")
         points, axes = self._sweep_points()
         scheduled = tuple(self._schedule_point(point) for point in points)
+        tagged_starts = [
+            pulse.start_s
+            for scheduled_point in scheduled
+            for pulse in scheduled_point.pulses
+            if pulse.definition.is_readout
+        ]
+        if tagged_starts:
+            padding_s = self.readouts["ro"].marker_padding_s
+            sequence_shift_s = max(0.0, padding_s - min(tagged_starts))
+            if sequence_shift_s:
+                scheduled = tuple(
+                    self._shift_scheduled_point(point, sequence_shift_s)
+                    for point in scheduled
+                )
         trigger_delays = {
             point.trigger_delays_s["ro"] for point in scheduled
         }
@@ -530,6 +570,7 @@ class ExperimentProgram:
                 "is not a declared generator channel"
             )
         markers = np.zeros((len(points), step_samples), dtype=np.bool_)
+        readout_windows_s = np.zeros((len(points), 2), dtype=np.float64)
 
         for point_index, scheduled_point in enumerate(scheduled):
             for pulse in scheduled_point.pulses:
@@ -549,8 +590,64 @@ class ExperimentProgram:
                 )
                 active_marker[:marker_samples] = True
             else:
-                _, active_marker = trigger_channel_for(
-                    channel_waveforms[readout.waveform_channel][point_index],
+                tagged_readout_pulses = [
+                    pulse
+                    for pulse in scheduled_point.pulses
+                    if pulse.definition.is_readout
+                ]
+                if tagged_readout_pulses:
+                    readout_windows_s[point_index] = (
+                        min(
+                            pulse.start_s
+                            for pulse in tagged_readout_pulses
+                        ),
+                        max(
+                            pulse.stop_s
+                            for pulse in tagged_readout_pulses
+                        ),
+                    )
+                    marker_start_s = max(
+                        0.0,
+                        min(
+                            pulse.start_s
+                            for pulse in tagged_readout_pulses
+                        )
+                        - readout.marker_padding_s,
+                    )
+                    marker_stop_s = (
+                        max(
+                            pulse.stop_s
+                            for pulse in tagged_readout_pulses
+                        )
+                        + readout.marker_padding_s
+                    )
+                    marker_start = int(
+                        round(marker_start_s * sample_rate_hz)
+                    )
+                    marker_stop = int(
+                        round(marker_stop_s * sample_rate_hz)
+                    )
+                    active_marker = np.zeros(
+                        step_samples,
+                        dtype=np.bool_,
+                    )
+                    active_marker[marker_start:marker_stop] = True
+                else:
+                    reference = channel_waveforms[
+                        readout.waveform_channel
+                    ][point_index]
+                    active = np.flatnonzero(np.abs(reference) > 0)
+                    readout_windows_s[point_index] = (
+                        active[0] / sample_rate_hz,
+                        (active[-1] + 1) / sample_rate_hz,
+                    )
+                    _, active_marker = trigger_channel_for(
+                        reference,
+                    )
+            if readout.waveform_channel is None:
+                readout_windows_s[point_index] = (
+                    0.0,
+                    readout.length_s,
                 )
             markers[point_index] = active_marker
 
@@ -562,9 +659,11 @@ class ExperimentProgram:
             point_coordinates=tuple(points),
             channel_waveforms=channel_waveforms,
             marker_waveforms=markers,
+            readout_windows_s=readout_windows_s,
             readout=readout,
             trigger_delay_s=trigger_delay_s,
             channel_amplitudes_vpp=channel_amplitudes,
+            remove_dc_offset=bool(self.REMOVE_DC_OFFSET),
             _hardware=hardware,
         )
 
@@ -627,12 +726,30 @@ class ExperimentProgram:
                             if definition.edge_length_s is None
                             else definition.edge_length_s.resolve(point)
                         ),
+                        decay_s=(
+                            None
+                            if definition.decay_s is None
+                            else definition.decay_s.resolve(point)
+                        ),
                     )
                 )
                 if event.at_s is None:
                     cursor_s = stop_s
                 continue
-            trigger_delay_s = event.trigger_delay_s.resolve(point)
+            readout = self.readouts[event.readout_name]
+            has_tagged_readout = any(
+                definition.is_readout
+                for definition in self.pulses.values()
+            )
+            trigger_delay_s = (
+                readout.marker_padding_s
+                if event.trigger_delay_s is None and has_tagged_readout
+                else (
+                    0.0
+                    if event.trigger_delay_s is None
+                    else event.trigger_delay_s.resolve(point)
+                )
+            )
             if trigger_delay_s < 0:
                 raise ValueError("ATS trigger_delay cannot be negative")
             trigger_delays[event.readout_name] = trigger_delay_s
@@ -640,8 +757,33 @@ class ExperimentProgram:
         if "ro" not in trigger_delays:
             raise ValueError("Program body must trigger the 'ro' readout")
         readout = self.readouts["ro"]
-        if readout.waveform_channel is None:
+        tagged_readout_pulses = [
+            pulse for pulse in pulses if pulse.definition.is_readout
+        ]
+        if tagged_readout_pulses:
+            if readout.waveform_channel is None:
+                raise ValueError(
+                    "Tagged readout pulses require readout waveform_ch"
+                )
+            tagged_channels = {
+                self.generators[pulse.definition.generator].channel
+                for pulse in tagged_readout_pulses
+            }
+            if tagged_channels != {readout.waveform_channel}:
+                raise ValueError(
+                    "Tagged readout pulses must use the readout waveform_ch"
+                )
+            readout_start = min(
+                pulse.start_s for pulse in tagged_readout_pulses
+            )
+            readout_stop = readout_start + readout.length_s
+            marker_stop = (
+                max(pulse.stop_s for pulse in tagged_readout_pulses)
+                + readout.marker_padding_s
+            )
+        elif readout.waveform_channel is None:
             readout_stop = readout.length_s
+            marker_stop = float(readout.marker_length_s)
         else:
             reference_generators = {
                 name
@@ -662,11 +804,13 @@ class ExperimentProgram:
                 min(pulse.start_s for pulse in reference_pulses)
                 + readout.length_s
             )
+            marker_stop = max(pulse.stop_s for pulse in reference_pulses)
         duration_s = max(
             [
                 cursor_s,
                 *[pulse.stop_s for pulse in pulses],
                 readout_stop,
+                marker_stop,
             ]
         ) + self.final_delay_s
         return ScheduledPoint(
@@ -674,6 +818,33 @@ class ExperimentProgram:
             pulses=tuple(pulses),
             trigger_delays_s=trigger_delays,
             duration_s=duration_s,
+        )
+
+    @staticmethod
+    def _shift_scheduled_point(
+        point: ScheduledPoint,
+        shift_s: float,
+    ) -> ScheduledPoint:
+        shifted_pulses = tuple(
+            ScheduledPulse(
+                definition=pulse.definition,
+                start_s=pulse.start_s + shift_s,
+                stop_s=pulse.stop_s + shift_s,
+                frequency_hz=pulse.frequency_hz,
+                phase_radians=pulse.phase_radians,
+                gain=pulse.gain,
+                sigma_s=pulse.sigma_s,
+                edge_sigma_s=pulse.edge_sigma_s,
+                edge_length_s=pulse.edge_length_s,
+                decay_s=pulse.decay_s,
+            )
+            for pulse in point.pulses
+        )
+        return ScheduledPoint(
+            coordinates=point.coordinates.copy(),
+            pulses=shifted_pulses,
+            trigger_delays_s=point.trigger_delays_s.copy(),
+            duration_s=point.duration_s + shift_s,
         )
 
     @staticmethod
@@ -715,7 +886,7 @@ class ExperimentProgram:
                 raise ValueError(
                     "Gaussian-square pulse is too short for edge_sigma"
                 ) from exc
-        else:
+        elif style == "cosine_square":
             edge_length_s = pulse.edge_length_s
             if edge_length_s is None or edge_length_s <= 0:
                 raise ValueError(
@@ -732,6 +903,14 @@ class ExperimentProgram:
                 raise ValueError(
                     "Cosine-square pulse is too short for edge_length"
                 ) from exc
+        else:
+            decay_s = pulse.decay_s
+            if decay_s is None or decay_s <= 0:
+                raise ValueError(
+                    "Exponential pulses require decay > 0"
+                )
+            time_s = np.arange(count, dtype=np.float64) / sample_rate_hz
+            envelope = pulse.gain * np.exp(-time_s / (2.0 * decay_s))
 
         return modulate_envelope(
             envelope,
