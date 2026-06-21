@@ -151,8 +151,8 @@ class AWGAlazar:
         if integrate_time_s is not None:
             self.integrate_time_s = float(integrate_time_s)
             self.integrate_window_ns = (
-                0.0,
-                self.integrate_time_s * 1e9,
+                self.trigger_delay_s * 1e9,
+                (self.trigger_delay_s + self.integrate_time_s) * 1e9,
             )
         elif integrate_window_ns is not None:
             self.integrate_window_ns = (
@@ -186,6 +186,7 @@ class AWGAlazar:
         self.last_shot_iq: npt.NDArray[np.complex128] | None = None
         self.last_time_s: npt.NDArray[np.float64] | None = None
         self._uploaded_compiled: CompiledExperiment | None = None
+        self._uploaded_sequence_name: str | None = None
 
         self._validate_settings()
         self.processor = AlazarProcessor(self.alazar_sample_rate_hz)
@@ -281,6 +282,7 @@ class AWGAlazar:
 
     @property
     def trigger_delay_samples(self) -> int:
+        """Integration-window delay from the start of the acquired record."""
         return self.ns2cycles(self.trigger_delay_s * 1e9, inst="adc")
 
     @property
@@ -357,7 +359,7 @@ class AWGAlazar:
             TriggerConfig(
                 slope=self.trigger_slope,
                 level=self.trigger_level,
-                delay_samples=self.trigger_delay_samples,
+                delay_samples=0,
                 timeout_ticks=0,
             ),
             use_external_10mhz_reference=self.use_external_10mhz_reference,
@@ -372,11 +374,14 @@ class AWGAlazar:
         integrate_time_s: float,
         adc_channel: str | int,
     ) -> None:
-        """Apply readout settings owned by one compiled experiment."""
+        """Acquire from the marker and integrate after trigger_delay_s."""
         self.tone_frequency_hz = float(tone_frequency_hz)
         self.trigger_delay_s = float(trigger_delay_s)
         self.integrate_time_s = float(integrate_time_s)
-        self.integrate_window_ns = (0.0, self.integrate_time_s * 1e9)
+        self.integrate_window_ns = (
+            self.trigger_delay_s * 1e9,
+            (self.trigger_delay_s + self.integrate_time_s) * 1e9,
+        )
         self.adc_channel = normalize_adc_channel(adc_channel)
         self._validate_settings()
         configure_ats9371(
@@ -385,7 +390,7 @@ class AWGAlazar:
             TriggerConfig(
                 slope=self.trigger_slope,
                 level=self.trigger_level,
-                delay_samples=self.trigger_delay_samples,
+                delay_samples=0,
                 timeout_ticks=0,
             ),
             use_external_10mhz_reference=self.use_external_10mhz_reference,
@@ -404,6 +409,19 @@ class AWGAlazar:
             else np.zeros_like(active)
             for marker in range(1, compiled.readout.marker_number + 1)
         )
+
+    @staticmethod
+    def _awg_sequence_order(number_of_steps: int) -> tuple[int, ...]:
+        """Map physical AWG steps to logical compiler points.
+
+        AWG5208 begins a newly assigned sequence at its last programmed step.
+        Programming logical points ``1..N-1, 0`` therefore makes the first
+        emitted record logical point zero, followed by normal logical order.
+        """
+        steps = int(number_of_steps)
+        if steps < 1:
+            raise ValueError("number_of_steps must be positive")
+        return tuple(range(1, steps)) + (0,)
 
     def upload_compiled_experiment(
         self,
@@ -480,13 +498,27 @@ class AWGAlazar:
             compiled.readout.marker_high_volts,
         )
 
+        # AWG5208 starts a newly assigned sequence from the last programmed
+        # step. Rotate the physical list so that this last step is logical
+        # point zero; subsequent playback then follows logical point order.
+        physical_order = self._awg_sequence_order(
+            compiled.number_of_sequence_steps
+        )
+        sequence_tracks = {
+            channel: [
+                waveform_names[logical_index]
+                for logical_index in physical_order
+            ]
+            for channel, waveform_names in tracks.items()
+        }
         sequence_name = self.awg.create_sequence(
             compiled.program_name,
-            tracks=tracks,
+            tracks=sequence_tracks,
             repetitions=1,
             goto_step=1,
         )
         self._uploaded_compiled = compiled
+        self._uploaded_sequence_name = sequence_name
         return sequence_name
 
     def acquire_compiled_experiment(
@@ -609,7 +641,18 @@ class AWGAlazar:
         n_average: int,
     ) -> npt.NDArray[np.float64]:
         config = self._acquisition_config(n_average=n_average)
-        self.awg.stop()
+        if self._uploaded_sequence_name is None:
+            self.awg.stop()
+        else:
+            rewind = getattr(self.awg, "rewind_sequence", None)
+            if rewind is None:
+                # Notebook kernels can contain an AWG5208 instance created
+                # before the driver module was reloaded. Stopping is safe and
+                # avoids an AttributeError; recreate the hardware connection
+                # to obtain the full sequence-rewind behavior.
+                self.awg.stop()
+            else:
+                rewind(self._uploaded_sequence_name)
         session = arm_capture(self.ats_api, self.ats_board, config)
         try:
             start_capture(self.ats_api, session)
@@ -669,16 +712,20 @@ class AWGAlazar:
         left = (window_samples - 1) // 2
         right = window_samples // 2
         padded = np.pad(baseband, ((0, 0), (left, right)), mode="edge")
-        kernel = np.ones(window_samples, dtype=np.float64) / window_samples
-        return np.apply_along_axis(
-            lambda row: np.convolve(row, kernel, mode="valid"),
-            axis=1,
-            arr=padded,
+        cumulative = np.pad(
+            np.cumsum(padded, axis=1),
+            ((0, 0), (1, 0)),
         )
+        return (
+            cumulative[:, window_samples:]
+            - cumulative[:, :-window_samples]
+        ) / window_samples
 
     def acquire_decimate(
         self,
         n_average: int,
+        *,
+        remove_dc_offset: bool = False,
     ) -> tuple[
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
@@ -686,6 +733,9 @@ class AWGAlazar:
     ]:
         """Return raw and low-pass downconverted traces inside the integration window."""
         records = self._capture_records(n_average=n_average)
+        if remove_dc_offset:
+            records = remove_record_dc_offset(records)
+            self.last_records_volts = records
         baseband = digital_downconvert(
             records,
             self.alazar_sample_rate_hz,
@@ -708,12 +758,17 @@ class AWGAlazar:
     def acquire(
         self,
         n_average: int,
+        *,
+        remove_dc_offset: bool = False,
     ) -> tuple[
         npt.NDArray[np.complex128],
         np.complex128,
     ]:
         """Return per-shot IQ points and their mean from the integration window."""
         records = self._capture_records(n_average=n_average)
+        if remove_dc_offset:
+            records = remove_record_dc_offset(records)
+            self.last_records_volts = records
         window = self._integration_slice(records.shape[1])
         baseband = digital_downconvert(
             records,

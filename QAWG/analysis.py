@@ -109,7 +109,7 @@ def calculate_window(
     plot: bool = True,
     report: bool = True,
 ) -> WindowAnalysis:
-    """Recommend ATS trigger delay and IQ integration window.
+    """Recommend integration delay and IQ integration window.
 
     The measured rising edge is found near the compiled readout waveform.
     Integration duration comes from that waveform, so marker-edge transients
@@ -173,7 +173,7 @@ def calculate_window(
             integration_stop_s,
             float(result.acquire_window_s),
         )
-    suggested_trigger_s = initial_trigger_s + integration_start_s
+    suggested_trigger_s = integration_start_s
 
     raw_plot_time_s = result.raw_time_s
     iq_plot_time_s = result.iq_time_s
@@ -200,8 +200,6 @@ def calculate_window(
         marker_label = None
         if result.marker_windows_s is not None:
             marker_start_s, marker_stop_s = result.marker_windows_s[step]
-            marker_start_s -= initial_trigger_s
-            marker_stop_s -= initial_trigger_s
             marker_label = (
                 f"Marker high "
                 f"({(marker_stop_s - marker_start_s) * 1e9:.0f} ns)"
@@ -248,7 +246,7 @@ def calculate_window(
         axes[0].set_ylabel("ADC voltage (mV)")
         axes[0].set_title(
             "Raw average in acquired window "
-            f"(post-trigger delay {initial_trigger_s * 1e9:.3f} ns)"
+            "(starts at received marker)"
         )
         axes[1].set_xlabel("Time in acquired window (ns)")
         axes[1].set_ylabel("|IQ| (mV)")
@@ -259,7 +257,7 @@ def calculate_window(
         figure.tight_layout()
 
     if report:
-        print(f"Configured post-trigger delay: {initial_trigger_s * 1e9:.3f} ns")
+        print(f"Configured integration delay: {initial_trigger_s * 1e9:.3f} ns")
         print(
             "Measured readout arrival in acquire window: "
             f"{measured_rise_s * 1e9:.3f} ns"
@@ -274,7 +272,7 @@ def calculate_window(
             f"{(integration_stop_s - integration_start_s) * 1e9:.3f} ns"
         )
         print(
-            "Equivalent post-trigger delay if moved into ATS delay: "
+            "Suggested integration delay from received marker: "
             f"{suggested_trigger_s * 1e9:.3f} ns"
         )
         print(f"DC offset removal: {result.remove_dc_offset}")

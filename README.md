@@ -183,8 +183,9 @@ iq_average = result.iq_average("ro")
 - 未指定 `at` 的 `play()` 會沿 program cursor 排列。
 - `delay_auto()` 從上一個 pulse 結束後加入 delay。
 - `waveform_ch` 會讓 compiler 依該 channel 的 active waveform 建立 marker。
-- `trigger_delay` 是 ATS9371 收到 marker 後的 hardware acquisition delay。
-- 同一 sequence 內的 ATS trigger delay 必須固定。
+- ATS9371 收到 marker 後立即開始擷取完整 acquire window。
+- `trigger_delay` 是 acquire window 內 integration window 的起點。
+- 同一 sequence 內的 integration delay 必須固定。
 
 ## Demo
 
@@ -247,3 +248,35 @@ python -m pytest -q
 [QAWG/timeline.py](QAWG/timeline.py)，AWG5208 底層 driver 說明位於
 [QAWG/awg5200](QAWG/awg5200)，Alazar acquisition 與 DSP 位於
 [QAWG/alazar](QAWG/alazar)。
+# Single-HEMT temporal-mode tomography
+
+For a transmon/waveguide setup near 5.9 GHz with a 50 MHz IF:
+
+```powershell
+python tomo.py hemt-stream `
+  --device-frequency 5.9e9 `
+  --if-frequency 50e6 `
+  --total-shots 1000000 `
+  --chunk-shots 2000
+```
+
+The sequence alternates `reference` (zero AWG drive) and `signal`, projects
+each IQ trace onto one temporal mode, and discards the raw chunk. Check
+`stream_mode_calibration.png` before trusting the run.
+
+For continuously driven fluorescence, use the default boxcar mode and
+calibrate `--tomo-mode-start-ns` and `--tomo-mode-ns`. For a released pulse:
+
+```powershell
+python tomo.py hemt-stream --tomo-mode decay --tomo-decay-ns 60
+```
+
+`--tomo-decay-ns` is the **amplitude** lifetime. Calibrate IQ leakage, vacuum
+reference, input loss, thermal occupation, and volts per sqrt(photon).
+Only after calibrating the last quantity should Wigner reconstruction run:
+
+```powershell
+python tomo.py analyze-hemt `
+  --data-dir tomodata\YYYYMMDD_HHMMSS `
+  --photon-scale-volts 1.23e-4
+```

@@ -9,7 +9,7 @@ conversion、digital downconversion、filter、integration 與 multiplex DSP。
 
 概念上分成兩個時間範圍：
 
-- **Acquire window**：ATS trigger delay 後擷取到的完整 ADC record，用來 debug
+- **Acquire window**：ATS 收到 marker 後立即擷取的完整 ADC record，用來 debug
   raw trace 與 demodulated trace。
 - **Integration window**：在 acquire window 內選一段 `[delay, integration_time]`
   計算每 shot IQ。

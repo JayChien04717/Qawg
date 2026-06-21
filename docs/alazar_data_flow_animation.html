@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alazar 資料處理動畫</title>
+<style>
+:root{color-scheme:dark;--bg:#07111f;--panel:#0d1b2d;--line:#29415f;--text:#e8f1ff;--muted:#91a7c4;--cyan:#39d9ff;--green:#61e294;--orange:#ffb454;--pink:#ff6fae}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0,#123152 0,transparent 35%),var(--bg);color:var(--text);font:15px/1.5 system-ui,"Microsoft JhengHei",sans-serif}
+main{max-width:1180px;margin:auto;padding:28px 18px 60px}h1{margin:0;font-size:clamp(25px,4vw,42px)}h2{margin:0 0 6px;font-size:22px}.lead,.note{color:var(--muted)}
+.controls{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:22px 0;padding:12px;background:#091728eF;border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(10px)}
+button{border:1px solid #416080;border-radius:9px;background:#132a43;color:var(--text);padding:8px 14px;cursor:pointer}button:hover{border-color:var(--cyan)}input{accent-color:var(--cyan)}
+.card{margin-top:18px;padding:20px;background:linear-gradient(145deg,#0e2035,#091625);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 60px #0005}
+.flow{display:grid;grid-template-columns:repeat(6,1fr);gap:20px;align-items:stretch;margin-top:18px}.node{position:relative;min-height:132px;padding:14px;border:1px solid #35506f;border-radius:13px;background:#10243a;transition:.25s}.node.active{border-color:var(--cyan);box-shadow:0 0 24px #39d9ff44;transform:translateY(-3px)}.node.done{border-color:#3d9063}.node h3{font-size:15px;margin:0 0 7px}.node p{font-size:12px;color:var(--muted);margin:0}.arrow{position:absolute;right:-22px;top:50%;width:22px;height:2px;background:var(--line)}.arrow:after{content:"";position:absolute;right:0;top:-4px;border-left:7px solid var(--line);border-top:5px solid transparent;border-bottom:5px solid transparent}
+.packet{position:absolute;width:10px;height:10px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px var(--cyan);top:calc(50% - 5px);right:-5px;opacity:0}.node.active .packet{animation:travel .8s linear infinite}@keyframes travel{from{transform:translateX(-16px);opacity:0}20%{opacity:1}to{transform:translateX(22px);opacity:0}}
+.memory{height:48px;display:flex;align-items:flex-end;gap:3px;margin-top:12px}.memory i{display:block;flex:1;height:12%;background:var(--cyan);border-radius:2px;transition:.3s}.node.active .memory i{animation:bars .8s ease-in-out infinite alternate}.memory i:nth-child(2n){animation-delay:.15s}.memory i:nth-child(3n){animation-delay:.3s}@keyframes bars{to{height:90%;background:var(--green)}}
+.stage{display:grid;grid-template-columns:1.25fr .75fr;gap:16px;margin-top:18px}.canvasbox{background:#071422;border:1px solid var(--line);border-radius:13px;padding:10px}canvas{display:block;width:100%;height:260px}.readout{display:grid;gap:10px}.metric{padding:13px;background:#0a192a;border:1px solid var(--line);border-radius:11px}.metric b{display:block;font-size:22px;color:var(--cyan)}.formula{font:16px ui-monospace,SFMono-Regular,Consolas,monospace;color:#cbe9ff}
+.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:18px;margin-top:16px}.pipe{padding:12px;border:1px solid var(--line);border-radius:11px;color:var(--muted);text-align:center}.pipe.active{color:var(--text);border-color:var(--orange);box-shadow:0 0 18px #ffb45433}.legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:12px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+@media(max-width:850px){.flow,.pipeline{grid-template-columns:1fr 1fr}.arrow{display:none}.stage{grid-template-columns:1fr}}@media(max-width:520px){.flow,.pipeline{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Alazar 資料旅程</h1>
+  <p class="lead">從 ATS9371 接到 trigger，到百萬個 shots 被壓縮成可做量子態重建的複數樣本。</p>
+
+  <div class="controls">
+    <button id="play">暫停</button><button id="step">下一步</button><button id="reset">重置</button>
+    <label>速度 <input id="speed" type="range" min="250" max="1800" value="900" step="50"></label>
+    <span id="status" class="note"></span>
+  </div>
+
+  <section class="card">
+    <h2>① 擷取與記憶體</h2>
+    <p class="note">DMA buffers 是循環使用的搬運卡車；目前 QAWG 最後仍會在 PC RAM 建立完整陣列。</p>
+    <div class="flow" id="hardwareFlow">
+      <div class="node"><h3>Trigger</h3><p>AWG marker 觸發一筆 record</p><div class="memory"><i></i><i></i><i></i><i></i></div><span class="packet"></span><span class="arrow"></span></div>
+      <div class="node"><h3>ATS9371</h3><p>1 GS/s ADC，NPT AutoDMA</p><div class="memory"><i></i><i></i><i></i><i></i><i></i></div><span class="packet"></span><span class="arrow"></span></div>
+      <div class="node"><h3>DMA ring</h3><p>預設 4 buffers，完成後重新 post</p><div class="memory"><i></i><i></i><i></i><i></i></div><span class="packet"></span><span class="arrow"></span></div>
+      <div class="node"><h3>uint16</h3><p>ADC codes：2 bytes/sample</p><div class="memory"><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="packet"></span><span class="arrow"></span></div>
+      <div class="node"><h3>float64 volts</h3><p>轉成電壓：8 bytes/sample</p><div class="memory"><i></i><i></i><i></i><i></i><i></i><i></i></div><span class="packet"></span><span class="arrow"></span></div>
+      <div class="node"><h3>complex128 IQ</h3><p>DDC 後：16 bytes/sample</p><div class="memory"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+    </div>
+    <p class="note" id="memoryText"></p>
+  </section>
+
+  <section class="card">
+    <h2>② 一個 shot 如何變成一個複數樣本</h2>
+    <div class="pipeline" id="signalFlow">
+      <div class="pipe">ADC trace</div><div class="pipe">Digital downconversion</div><div class="pipe">Low-pass</div><div class="pipe">Temporal-mode dot product</div><div class="pipe">S = I + iQ</div>
+    </div>
+    <div class="stage">
+      <div class="canvasbox"><canvas id="trace"></canvas><div class="legend"><span><i class="dot" style="background:#39d9ff"></i>目前訊號</span><span><i class="dot" style="background:#ffb454"></i>temporal mode</span></div></div>
+      <div class="readout">
+        <div class="metric"><span>目前 shot</span><b id="shot">1</b></div>
+        <div class="metric"><span>投影結果</span><b id="complex">0.00 + 0.00i</b><div class="formula">Sₖ = Σ w*[n] IQₖ[n]</div></div>
+        <div class="metric"><span>資料縮減</span><b id="reduction">—</b><small class="note">一條 complex trace → 一個 complex128</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>③ 多個 shots 形成統計分布</h2>
+    <div class="stage">
+      <div class="canvasbox"><canvas id="iq"></canvas></div>
+      <div class="readout">
+        <div class="metric"><span>已處理 shots</span><b id="count">0</b></div>
+        <div class="metric"><span>最後用途</span><p>IQ histogram<br>statistical moments<br>density matrix / Wigner function</p></div>
+        <div class="metric"><span>百萬 shots 儲存量</span><b>約 16 MB</b><small class="note">只保存每 shot 一個 complex128；不含檔案 metadata。</small></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const $=s=>document.querySelector(s), hw=[...document.querySelectorAll(".node")], pipes=[...document.querySelectorAll(".pipe")];
+let playing=true, phase=0, shot=0, timer, points=[], trace=[], mode=[];
+const traceCanvas=$("#trace"), iqCanvas=$("#iq");
+function fit(c){const d=devicePixelRatio||1,r=c.getBoundingClientRect();c.width=r.width*d;c.height=r.height*d;return [c.getContext("2d"),r.width,r.height,d]}
+function axes(ctx,w,h,d){ctx.setTransform(d,0,0,d,0,0);ctx.clearRect(0,0,w,h);ctx.strokeStyle="#29415f";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(35,h/2);ctx.lineTo(w-10,h/2);ctx.moveTo(35,12);ctx.lineTo(35,h-25);ctx.stroke()}
+function makeShot(){let p=Math.random()*Math.PI*2;trace=Array.from({length:160},(_,n)=>{let env=Math.exp(-Math.pow((n-78)/29,2));return .7*env*Math.cos(.48*n+p)+(.18*Math.random()-.09)});mode=Array.from({length:160},(_,n)=>Math.exp(-Math.pow((n-78)/29,2)));let I=Math.cos(p)+(.25*Math.random()-.125),Q=Math.sin(p)+(.25*Math.random()-.125);return [I,Q]}
+function drawTrace(stage){let [ctx,w,h,d]=fit(traceCanvas);axes(ctx,w,h,d);let data=trace;if(stage===1)data=trace.map((v,n)=>v*Math.cos(.48*n)+v*Math.sin(.48*n));if(stage>=2)data=data.map((v,n,a)=>(a.slice(Math.max(0,n-3),n+4).reduce((x,y)=>x+y,0)/(Math.min(n+4,a.length)-Math.max(0,n-3))));ctx.strokeStyle="#39d9ff";ctx.lineWidth=2;ctx.beginPath();data.forEach((v,n)=>{let x=35+n*(w-50)/(data.length-1),y=h/2-v*70;(n?ctx.lineTo(x,y):ctx.moveTo(x,y))});ctx.stroke();if(stage>=3){ctx.strokeStyle="#ffb454";ctx.beginPath();mode.forEach((v,n)=>{let x=35+n*(w-50)/(mode.length-1),y=h-28-v*80;(n?ctx.lineTo(x,y):ctx.moveTo(x,y))});ctx.stroke()}}
+function drawIQ(){let [ctx,w,h,d]=fit(iqCanvas);axes(ctx,w,h,d);ctx.fillStyle="#ff6faeaa";points.forEach(([x,y])=>{ctx.beginPath();ctx.arc(w/2+x*60,h/2-y*60,3,0,7);ctx.fill()});ctx.fillStyle="#91a7c4";ctx.fillText("I",w-18,h/2-7);ctx.fillText("Q",42,15)}
+function render(){hw.forEach((n,i)=>{n.classList.toggle("active",phase===i);n.classList.toggle("done",phase>i)});let sig=Math.max(0,phase-6);pipes.forEach((n,i)=>n.classList.toggle("active",sig===i));drawTrace(sig);drawIQ();$("#status").textContent=`步驟 ${phase+1}/11`;$("#memoryText").textContent=phase<6?"DMA 只配置少量固定 buffers；完整 acquisition array 才會隨 shots 增長。":"每 shot 的完整 IQ trace 在 temporal-mode projection 後可立即釋放。"}
+function next(){phase=(phase+1)%11;if(phase===6){shot++;let p=makeShot();points.push(p);if(points.length>250)points.shift();$("#shot").textContent=shot.toLocaleString();$("#complex").textContent=`${p[0].toFixed(2)} ${p[1]>=0?"+":"−"} ${Math.abs(p[1]).toFixed(2)}i`;$("#count").textContent=shot.toLocaleString();$("#reduction").textContent=`${trace.length}:1`}render()}
+function schedule(){clearInterval(timer);timer=setInterval(()=>playing&&next(),2050-Number($("#speed").value))}
+$("#play").onclick=()=>{playing=!playing;$("#play").textContent=playing?"暫停":"播放"};$("#step").onclick=next;$("#reset").onclick=()=>{phase=shot=0;points=[];makeShot();render()};$("#speed").oninput=schedule;
+makeShot();render();schedule();addEventListener("resize",render);
+</script>
+</body>
+</html>

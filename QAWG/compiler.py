@@ -557,11 +557,12 @@ class ExperimentProgram:
         if (
             hardware is not None
             and hasattr(hardware, "acquire_window_ns")
-            and integrate_time_s * 1e9 > hardware.acquire_window_ns
+            and (trigger_delay_s + integrate_time_s) * 1e9
+            > hardware.acquire_window_ns
         ):
             raise ValueError(
-                "Readout integration window exceeds the hardware "
-                "acquisition window"
+                "trigger_delay + readout integration time exceeds the "
+                "hardware acquisition window"
             )
         if (
             readout.waveform_channel is not None

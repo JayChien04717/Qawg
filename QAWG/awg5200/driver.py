@@ -345,6 +345,21 @@ class AWG5208:
         self._sequences[sequence_name] = track_waveforms
         return sequence_name
 
+    def rewind_sequence(self, sequence_name: str) -> None:
+        """Stop and reassign a sequence so playback restarts from step one."""
+        if sequence_name not in self._sequences:
+            raise ValueError(
+                f"sequence {sequence_name!r} was not created by this driver session"
+            )
+        self.stop()
+        tracks = self._sequences[sequence_name]
+        for track_index, channel in enumerate(sorted(tracks), start=1):
+            self.write(
+                f"SOURce{channel}:CASSet:SEQuence "
+                f"{quote_scpi(sequence_name)},{track_index}"
+            )
+        self.wait_until_complete()
+
     def upload_waveform(
         self,
         waveform_array: npt.ArrayLike,

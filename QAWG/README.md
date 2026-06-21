@@ -112,25 +112,26 @@ For a tagged readout pulse, the compiler creates the marker from that pulse
 only. By default the marker begins `500 ns` before the pulse and ends `500 ns`
 after it. If the pulse starts too early to provide the requested pre-padding,
 the compiler shifts the entire shot later while preserving all relative pulse
-timing. `self.trigger("ro")` then uses the marker padding as the initial ATS
-post-trigger delay. Pass `trigger_delay=...` explicitly after measuring the
-actual hardware time of flight.
+timing. `self.trigger("ro")` then uses the marker padding as the initial
+integration delay inside the acquired record. Pass `trigger_delay=...`
+explicitly after measuring the actual hardware time of flight.
 
 Programs without a tagged readout pulse retain the older behavior: the
 compiler uses `waveform_ch` as the marker reference and finds that channel's
 active waveform interval.
 For a marker fixed at the beginning of every sequence step, use
 `marker_length=40 * ns` instead of `waveform_ch`.
-`trigger_delay` configures how long ATS9371 waits after receiving the marker
-before acquisition begins. The hardware delay must be identical for every
-sequence step.
+ATS9371 begins the acquire window immediately after receiving the marker.
+`trigger_delay` configures the integration-window offset inside that acquired
+record. The delay must be identical for every sequence step.
 
 When `compiled.acquire(...)` starts, its compatibility wrapper delegates to
 `AWGAlazar`. The coordinator applies the ADC channel, demodulation frequency,
-trigger delay, and integration time to the ATS9371, uploads the compiled AWG
-sequence when needed, and collects the result.
-`integrate_time` averages IQ from the beginning of the acquired trace; it must
-fit inside both the readout length and hardware acquisition window.
+integration delay, and integration time, uploads the compiled AWG sequence
+when needed, and collects the result.
+`integrate_time` averages IQ from `trigger_delay` to
+`trigger_delay + integrate_time`; that interval must fit inside the hardware
+acquisition window.
 
 It intentionally resembles QICK's program style:
 

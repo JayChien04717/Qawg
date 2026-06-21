@@ -1,0 +1,7 @@
+﻿metric,value
+matched_mode_overlap_squared,0.9999999999999996
+boxcar_overlap_squared,0.04109971589129061
+short_window_overlap_squared,0.8663696781559036
+wigner_negativity_efficiency_threshold,0.5
+coherent_mean_photon_number,6.0
+coherent_cutoff_8_tail_probability,0.25602023954628295
