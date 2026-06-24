@@ -15,6 +15,7 @@ from .compiler import (
 from .awg_alazar import AWGAlazar
 from .awg5200 import AWG5208
 from .analysis import WindowAnalysis, calculate_window
+from .hdf5_writer import write_result_to_hdf5
 from .timeline import (
     Delay,
     Parallel,
@@ -70,4 +71,5 @@ __all__ = [
     "us",
     "waveform",
     "wigner_function",
+    "write_result_to_hdf5",
 ]

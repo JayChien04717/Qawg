@@ -14,6 +14,7 @@ QAWG/
     awg_alazar.py  AWG/Alazar execution coordinator
     compiler.py    Experiment rules and compiled sequence plan
     tomography.py  Heterodyne tomography helpers
+    hdf5_writer.py Labber-compatible HDF5 log files writer
 ```
 
 Common imports:
@@ -378,6 +379,45 @@ excited = shots[:, 1]
 ```
 
 No automatic average is performed by `shots()`.
+
+## Logging to Labber HDF5
+
+You can save your experiment results in Labber's HDF5 log format, which allows you to inspect them directly using the Labber Log Browser.
+
+### Decoupled Subprocess Architecture
+To bridge compatibility between the modern measurement environment and the older Python 3.9 environment required by Labber's official Python API, this module uses a **Decoupled Subprocess Architecture**:
+1. The measurement script calls `write_result_to_hdf5`, which serializes the `ExperimentResult` data into a temporary `.npz` file adjacent to the destination path.
+2. A lightweight converter subprocess (`labber_converter.py`) is spawned in the Labber Python environment.
+3. The converter loads the `.npz` file, reconstructs and pads the sweep/trace axes, uses the official Labber API (`Labber.createLogFile_ForData` and `.addEntry()`) to write the core data, and populates the instrument configurations using `h5py`.
+4. The temporary `.npz` file is automatically cleaned up.
+
+Import and use `write_result_to_hdf5`:
+
+```python
+from QAWG import write_result_to_hdf5
+
+# Save averaged results (default)
+write_result_to_hdf5(
+    result,
+    "path/to/my_measurement.hdf5",
+    comment="Spectroscopy run",
+    project="Spectroscopy",
+    user="Operator",
+    average_mode=True,
+    cfg=tof_cfg  # Automatically split and written to AWG and ATS config groups
+)
+```
+
+### Logging Modes
+- **Averaged Mode** (`average_mode=True`): Traces and integration shots are averaged over repetitions. The sweep dimensions in the file correspond exactly to the sweep axes declared in the program.
+- **Single-Shot Mode** (`average_mode=False`): Individual shot records are preserved. Repetitions are represented as an outer sweep dimension of size `n_average` (resulting in a multi-dimensional sweep of `Repetitions x Sweeps`).
+
+This interface maps:
+- Measured complex demodulated traces, real raw voltage traces, and integrated IQ points (using proper complex indicators and nan-padded trace lengths).
+- Swept channel coordinates (in `Data/Data`).
+- Metadata attributes (`creation_time`, `comment`, `user`, `project`, etc.) and physical instrument configuration parameters split into `Tektronix AWG5208 at localhost` and `AlazarTech ATS9371 at localhost`.
+
+For deep technical details on the payload structure, loop coordinate mapping, or adding new hardware and channel extensions, see [README_Labber_Interface.md]
 
 ## Current limits
 
