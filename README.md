@@ -1,4 +1,4 @@
-# QAWG
+# QAWG(V1)
 
 QAWG 是用於 Tektronix AWG5208 與 AlazarTech ATS9371 的 host-side
 實驗控制套件。它將實驗規則編譯成 AWG waveform 與 sequence，透過 marker
