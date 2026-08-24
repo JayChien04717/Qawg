@@ -220,6 +220,25 @@ AWG channel 的 marker bits，因此會降低該 channel 可用 DAC resolution�
 
 ## Sequence
 
+單波形與 sequence 可使用同一個 `AWGProgram` 入口；一個 step 會直接指派
+waveform，多個 steps 則由 driver 建立 sequence：
+
+```python
+from QAWG.awg5200 import AWGProgram, AWGStep
+
+program = AWGProgram(
+    name="readout",
+    steps=(AWGStep(waveforms={1: waveform}),),
+    amplitudes_vpp={1: 0.5},
+)
+uploaded = awg.upload_program(program)
+assert not uploaded.is_sequence
+```
+
+Marker bits 可放在每個 `AWGStep.markers`，marker voltage 則放在
+`AWGProgram.marker_levels`。AWG5208 特有的 sequence playback ordering 由
+driver 內部處理，呼叫端一律使用 logical step order。
+
 先上傳每個 waveform asset，再建立各 channel 的 sequence track：
 
 ```python

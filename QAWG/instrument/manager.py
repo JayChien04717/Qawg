@@ -83,9 +83,13 @@ class BaseInstrumentManager:
     ) -> Any:
         """Add a Yokogawa GS200 DC source."""
 
-        import pyvisa as visa
-
-        from .yoko import YOKOGS200
+        try:
+            import pyvisa as visa
+            from .yoko import YOKOGS200
+        except ImportError as exc:
+            raise ImportError(
+                "YOKOGS200 driver is not available in the current environment."
+            ) from exc
 
         rm = visa.ResourceManager()
         yoko = self.add_instrument(
@@ -169,7 +173,12 @@ class BaseInstrumentManager:
     ) -> Any:
         """Add an Anritsu MG3692 RF source."""
 
-        from .mg3692 import AnritsuMG3692
+        try:
+            from .mg3692 import AnritsuMG3692
+        except ImportError as exc:
+            raise ImportError(
+                "AnritsuMG3692 driver is not available in the current environment."
+            ) from exc
 
         return self.add_instrument(
             name,

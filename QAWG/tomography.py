@@ -177,26 +177,18 @@ def heterodyne_ml_density_matrix(
     rho = np.eye(cutoff, dtype=np.complex128) / cutoff
     identity = np.eye(cutoff, dtype=np.complex128)
     previous_log_likelihood = -np.inf
+    conj_coherent = np.conjugate(coherent_rows)
+    inv_n_samples = 1.0 / alpha.size
 
     for _ in range(iterations):
-        probabilities = np.real(
-            np.einsum(
-                "bi,ij,bj->b",
-                np.conjugate(coherent_rows),
-                rho,
-                coherent_rows,
-                optimize=True,
-            )
-        )
+        rho_coherent = coherent_rows @ rho.T
+        probabilities = np.real(np.sum(rho_coherent * conj_coherent, axis=1))
         probabilities = np.maximum(probabilities, 1e-15)
         log_likelihood = float(np.mean(np.log(probabilities)))
-        r_operator = np.einsum(
-            "bi,bj,b->ij",
-            coherent_rows,
-            np.conjugate(coherent_rows),
-            1.0 / probabilities,
-            optimize=True,
-        ) / alpha.size
+
+        weighted_conj = conj_coherent / probabilities[:, None]
+        r_operator = (coherent_rows.T @ weighted_conj) * inv_n_samples
+
         update = (1.0 - dilution) * identity + dilution * r_operator
         rho = update @ rho @ update
         rho = 0.5 * (rho + np.conjugate(rho.T))
@@ -219,28 +211,51 @@ def wigner_function(
     x: npt.ArrayLike,
     y: npt.ArrayLike,
 ) -> FloatArray:
-    """Evaluate W(alpha) = 2/pi Tr[D(-alpha) rho D(alpha) parity]."""
-    from scipy.linalg import expm
+    r"""Evaluate W(alpha) = 2/pi Tr[D(-alpha) rho D(alpha) parity].
+
+    Evaluated using the exact, vectorized Fock-basis Laguerre expansion:
+    \[
+    W(\alpha) = \frac{2}{\pi} e^{-2|\alpha|^2} \left[
+        \sum_{n=0}^{C-1} \rho_{nn} (-1)^n L_n(4|\alpha|^2)
+        + 2 \operatorname{Re}\left(
+            \sum_{m < n} \rho_{nm} (-1)^m \sqrt{\frac{m!}{n!}}
+            (2\alpha^*)^{n-m} L_m^{(n-m)}(4|\alpha|^2)
+        \right)
+    \right]
+    \]
+    """
+    from scipy.special import eval_genlaguerre
 
     rho = np.asarray(density_matrix, dtype=np.complex128)
     if rho.ndim != 2 or rho.shape[0] != rho.shape[1]:
         raise ValueError("density_matrix must be square")
     x_values = np.asarray(x, dtype=np.float64).reshape(-1)
     y_values = np.asarray(y, dtype=np.float64).reshape(-1)
+    alpha = x_values[None, :] + 1j * y_values[:, None]
+    alpha_sq = np.abs(alpha) ** 2
+    r_sq_4 = 4.0 * alpha_sq
     cutoff = rho.shape[0]
-    annihilation = np.zeros((cutoff, cutoff), dtype=np.complex128)
-    for number in range(1, cutoff):
-        annihilation[number - 1, number] = math.sqrt(number)
-    creation = np.conjugate(annihilation.T)
-    parity = np.diag((-1.0) ** np.arange(cutoff))
-    result = np.empty((y_values.size, x_values.size), dtype=np.float64)
 
-    for row, quadrature_y in enumerate(y_values):
-        for column, quadrature_x in enumerate(x_values):
-            alpha = complex(quadrature_x, quadrature_y)
-            displacement = expm(-alpha * creation + np.conjugate(alpha) * annihilation)
-            displaced = displacement @ rho @ np.conjugate(displacement.T)
-            result[row, column] = (
-                2.0 / np.pi * np.real(np.trace(displaced @ parity))
-            )
-    return result
+    total = np.zeros((y_values.size, x_values.size), dtype=np.complex128)
+
+    # Diagonal elements m == n
+    for n in range(cutoff):
+        if abs(rho[n, n]) > 1e-15:
+            L_n = eval_genlaguerre(n, 0, r_sq_4)
+            total += rho[n, n].real * ((-1.0) ** n) * L_n
+
+    # Off-diagonal elements m < n
+    two_alpha_conj = 2.0 * np.conjugate(alpha)
+    for m in range(cutoff):
+        for n in range(m + 1, cutoff):
+            if abs(rho[n, m]) > 1e-15:
+                k = n - m
+                c = ((-1.0) ** m) * math.sqrt(
+                    math.factorial(m) / math.factorial(n)
+                )
+                L_m_k = eval_genlaguerre(m, k, r_sq_4)
+                term = rho[n, m] * c * (two_alpha_conj ** k) * L_m_k
+                total += 2.0 * term
+
+    factor = (2.0 / np.pi) * np.exp(-2.0 * alpha_sq)
+    return np.asarray(np.real(factor * total), dtype=np.float64)

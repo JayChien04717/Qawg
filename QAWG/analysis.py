@@ -130,8 +130,8 @@ def calculate_window(
     if readout_duration_s <= 0:
         raise ValueError("Compiled readout waveform has no duration")
 
-    raw_average = result.trace_average()[step]
-    iq_average = result.iq_trace_average()[step]
+    raw_average = result.raw_average()[step]
+    iq_average = result.iq_average()[step]
     iq_envelope = _lowpass_iq_envelope(
         iq_average,
         result.iq_time_s,
@@ -276,6 +276,10 @@ def calculate_window(
             f"{suggested_trigger_s * 1e9:.3f} ns"
         )
         print(f"DC offset removal: {result.remove_dc_offset}")
+        print(
+            "External-trigger LSB masking: "
+            f"{result.external_trigger_lsb_masked}"
+        )
 
     return WindowAnalysis(
         step_index=step,
@@ -288,3 +292,128 @@ def calculate_window(
         figure=figure,
         axes=axes,
     )
+
+
+def _single_pole_iq(frequency_hz: np.ndarray, parameters: np.ndarray) -> np.ndarray:
+    f0_hz, log_linewidth_hz, c0_real, c0_imag, c1_real, c1_imag = parameters
+    linewidth_hz = np.exp(log_linewidth_hz)
+    background = c0_real + 1j * c0_imag
+    response = c1_real + 1j * c1_imag
+    return background + response / (
+        1.0 + 2j * (frequency_hz - f0_hz) / linewidth_hz
+    )
+
+
+def fit_resonator_linewidth(
+    frequency_hz: Any,
+    complex_iq: Any,
+) -> dict[str, Any]:
+    """Fit a single-pole complex resonator transmission/reflection response.
+
+    Parameters
+    ----------
+    frequency_hz : ArrayLike
+        Measured frequency points in Hz.
+    complex_iq : ArrayLike
+        Measured complex transmission / reflection values.
+
+    Returns
+    -------
+    dict
+        Fitting results containing:
+        - ``f0_hz``: Center resonance frequency (Hz)
+        - ``linewidth_hz``: Power linewidth / kappa / (2*pi) (Hz)
+        - ``fitted_iq``: Fitted model response at each input frequency
+        - ``r_squared``: Complex coefficient of determination (R^2)
+        - ``success``: Convergence status boolean
+    """
+    from scipy.optimize import least_squares
+
+    freq_arr = np.asarray(frequency_hz, dtype=float)
+    iq_arr = np.asarray(complex_iq, dtype=np.complex128)
+    if freq_arr.ndim != 1 or iq_arr.ndim != 1 or freq_arr.size != iq_arr.size:
+        raise ValueError(
+            "frequency_hz and complex_iq must be 1D arrays of matching length"
+        )
+    if freq_arr.size < 6:
+        raise ValueError(
+            "At least 6 frequency points are required for single-pole fit"
+        )
+
+    order = np.argsort(freq_arr)
+    sorted_freq = freq_arr[order]
+    sorted_iq = iq_arr[order]
+    spacing_hz = float(np.median(np.diff(sorted_freq)))
+    span_hz = float(np.ptp(sorted_freq))
+    edge_count = max(1, min(3, sorted_freq.size // 4))
+    background0 = complex(
+        np.mean(np.r_[sorted_iq[:edge_count], sorted_iq[-edge_count:]])
+    )
+    resonance_index = int(np.argmax(np.abs(sorted_iq - background0)))
+    f0_initial_hz = float(sorted_freq[resonance_index])
+    linewidth_initial_hz = float(max(2.0 * spacing_hz, span_hz / 10.0))
+    response0 = sorted_iq[resonance_index] - background0
+    initial = np.array(
+        [
+            f0_initial_hz,
+            np.log(linewidth_initial_hz),
+            background0.real,
+            background0.imag,
+            response0.real,
+            response0.imag,
+        ],
+        dtype=np.float64,
+    )
+    lower = np.array(
+        [
+            sorted_freq[0],
+            np.log(max(spacing_hz / 4.0, 1.0)),
+            -np.inf,
+            -np.inf,
+            -np.inf,
+            -np.inf,
+        ],
+        dtype=np.float64,
+    )
+    upper = np.array(
+        [
+            sorted_freq[-1],
+            np.log(max(2.0 * span_hz, spacing_hz)),
+            np.inf,
+            np.inf,
+            np.inf,
+            np.inf,
+        ],
+        dtype=np.float64,
+    )
+
+    def residual(parameters: np.ndarray) -> np.ndarray:
+        error = _single_pole_iq(sorted_freq, parameters) - sorted_iq
+        return np.r_[error.real, error.imag]
+
+    fit = least_squares(
+        residual,
+        initial,
+        bounds=(lower, upper),
+        x_scale="jac",
+        ftol=1e-12,
+        xtol=1e-12,
+        gtol=1e-12,
+    )
+    fitted_sorted_iq = _single_pole_iq(sorted_freq, fit.x)
+    residual_power = float(np.sum(np.abs(sorted_iq - fitted_sorted_iq) ** 2))
+    total_power = float(np.sum(np.abs(sorted_iq - np.mean(sorted_iq)) ** 2))
+    fit_r_squared = 1.0 - (
+        residual_power / total_power if total_power > 0 else 0.0
+    )
+
+    fitted_iq = np.empty_like(iq_arr)
+    fitted_iq[order] = fitted_sorted_iq
+
+    return {
+        "f0_hz": float(fit.x[0]),
+        "linewidth_hz": float(np.exp(fit.x[1])),
+        "fitted_iq": fitted_iq,
+        "r_squared": float(fit_r_squared),
+        "success": bool(fit.success),
+    }

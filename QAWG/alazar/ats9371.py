@@ -38,7 +38,6 @@ from .constants import (
     TRIGGER_SLOPE_NEGATIVE,
     TRIGGER_SLOPE_POSITIVE,
 )
-from .demodulation import _dispersive_demodulate
 
 MEM_COMMIT = 0x1000
 MEM_RELEASE = 0x8000
@@ -64,32 +63,60 @@ class TriggerConfig:
 
 
 @dataclass(frozen=True)
-class AcquisitionConfig:
+class CaptureConfig:
+    samples_per_record: int
+    records_per_acquisition: int = 1
     sample_rate_hz: float = 1e9
-    tone_frequency_hz: float = 100e6
-    samples_per_record: int = 2560
-    num_averages: int = 1
-    records_per_buffer: int = 1
+    records_per_buffer: int | None = None
+    maximum_records_per_buffer: int = 100
     dma_buffer_count: int = 4
     input_range_volts: float = 0.4
     timeout_ms: int = 5000
     channel: int = CHANNEL_A
+    mask_external_trigger_lsb: bool = False
 
     def __post_init__(self) -> None:
         alignment = SAMPLES_PER_RECORD_ALIGNMENT
-        min_samples = MIN_SAMPLES_PER_RECORD
-        
-        raw_samples = self.samples_per_record
-        rounded = math.ceil(raw_samples / alignment) * alignment
-        if rounded < min_samples:
-            rounded = min_samples
-
-        object.__setattr__(self, "samples_per_record", rounded)
+        samples = max(
+            MIN_SAMPLES_PER_RECORD,
+            math.ceil(int(self.samples_per_record) / alignment) * alignment,
+        )
+        object.__setattr__(self, "samples_per_record", samples)
+        if self.sample_rate_hz != 1e9:
+            raise ValueError("ATS9371 capture is currently fixed to 1 GS/s")
+        if self.records_per_acquisition < 1:
+            raise ValueError("records_per_acquisition must be positive")
+        if self.maximum_records_per_buffer < 1:
+            raise ValueError("maximum_records_per_buffer must be positive")
+        if self.dma_buffer_count < 2:
+            raise ValueError("dma_buffer_count must be at least 2")
+        if self.input_range_volts != 0.4:
+            raise ValueError("ATS9371 is currently configured for +/-400 mV")
+        if self.timeout_ms < 1:
+            raise ValueError("timeout_ms must be positive")
+        if self.channel not in (CHANNEL_A, CHANNEL_B):
+            raise ValueError("channel must be CHANNEL_A or CHANNEL_B")
+        if self.records_per_buffer is not None:
+            count = int(self.records_per_buffer)
+            if count < 1 or self.records_per_acquisition % count:
+                raise ValueError(
+                    "records_per_buffer must divide records_per_acquisition"
+                )
+            object.__setattr__(self, "records_per_buffer", count)
 
     @property
-    def records_per_acquisition(self) -> int:
-        """One triggered record is acquired for each average."""
-        return self.num_averages
+    def resolved_records_per_buffer(self) -> int:
+        if self.records_per_buffer is not None:
+            return self.records_per_buffer
+        maximum = min(
+            self.records_per_acquisition,
+            self.maximum_records_per_buffer,
+        )
+        return next(
+            count
+            for count in range(maximum, 0, -1)
+            if self.records_per_acquisition % count == 0
+        )
 
 
 @dataclass
@@ -111,44 +138,6 @@ class CaptureSession:
     active: bool = True
     started: bool = False
     released: bool = False
-
-
-@dataclass(frozen=True)
-class ToneAnalysis:
-    complex_amplitude: npt.NDArray[np.complex128]
-    amplitude_volts: npt.NDArray[np.float64]
-    phase_radians: npt.NDArray[np.float64]
-    peak_frequency_hz: npt.NDArray[np.float64]
-
-
-def validate_acquisition_config(config: AcquisitionConfig) -> None:
-    if config.sample_rate_hz != 1e9:
-        raise ValueError("This first driver path is fixed to ATS9371 at 1 GS/s")
-    if config.channel not in (CHANNEL_A, CHANNEL_B):
-        raise ValueError("channel must be CHANNEL_A or CHANNEL_B")
-    if config.samples_per_record < MIN_SAMPLES_PER_RECORD:
-        raise ValueError(f"samples_per_record must be >= {MIN_SAMPLES_PER_RECORD}")
-    if config.samples_per_record % SAMPLES_PER_RECORD_ALIGNMENT:
-        raise ValueError(
-            "samples_per_record must be a multiple of "
-            f"{SAMPLES_PER_RECORD_ALIGNMENT}"
-        )
-    if config.num_averages < 1:
-        raise ValueError("num_averages must be positive")
-    if config.records_per_buffer < 1:
-        raise ValueError("records_per_buffer must be positive")
-    if config.records_per_buffer > config.records_per_acquisition:
-        raise ValueError(
-            "records_per_buffer cannot exceed num_averages"
-        )
-    if config.records_per_acquisition % config.records_per_buffer:
-        raise ValueError(
-            "num_averages must be divisible by records_per_buffer"
-        )
-    if config.dma_buffer_count < 2:
-        raise ValueError("dma_buffer_count must be at least 2")
-    if not 0 <= config.tone_frequency_hz < config.sample_rate_hz / 2:
-        raise ValueError("tone_frequency_hz must be between DC and Nyquist")
 
 
 def open_ats9371(
@@ -205,10 +194,6 @@ def configure_channel(
         IMPEDANCE_50_OHM,
     )
     api.set_bw_limit(handle, channel, BW_LIMIT_DISABLE)
-
-
-def configure_channel_a(api: ATSApi, handle: int) -> None:
-    configure_channel(api, handle, CHANNEL_A)
 
 
 def configure_external_trigger(
@@ -282,16 +267,16 @@ def release_dma_memory(address: int) -> None:
 
 
 def arm_capture(
-    api: ATSApi, board: BoardInfo, config: AcquisitionConfig
+    api: ATSApi, board: BoardInfo, config: CaptureConfig
 ) -> CaptureSession:
-    validate_acquisition_config(config)
+    records_per_buffer = config.resolved_records_per_buffer
     buffers_per_acquisition = (
-        config.records_per_acquisition // config.records_per_buffer
+        config.records_per_acquisition // records_per_buffer
     )
     allocated_buffer_count = min(
         config.dma_buffer_count, buffers_per_acquisition
     )
-    sample_count = config.samples_per_record * config.records_per_buffer
+    sample_count = config.samples_per_record * records_per_buffer
     size_bytes = sample_count * bytes_per_sample(board.bits_per_sample)
     buffers: list[DmaBuffer] = []
 
@@ -306,7 +291,7 @@ def arm_capture(
             config.channel,
             0,
             config.samples_per_record,
-            config.records_per_buffer,
+            records_per_buffer,
             config.records_per_acquisition,
             ADMA_NPT | ADMA_EXTERNAL_STARTCAPTURE,
         )
@@ -325,7 +310,7 @@ def arm_capture(
         handle=board.handle,
         buffers=buffers,
         samples_per_record=config.samples_per_record,
-        records_per_buffer=config.records_per_buffer,
+        records_per_buffer=records_per_buffer,
         records_per_acquisition=config.records_per_acquisition,
         buffers_per_acquisition=buffers_per_acquisition,
         bits_per_sample=board.bits_per_sample,
@@ -410,43 +395,16 @@ def adc_codes_to_volts(
     raw_samples: npt.NDArray[np.uint16],
     bits_per_sample: int,
     input_range_volts: float,
+    *,
+    mask_external_trigger_lsb: bool = False,
 ) -> npt.NDArray[np.float64]:
     codes = unpack_adc_codes(raw_samples, bits_per_sample).astype(np.float64)
+    if mask_external_trigger_lsb:
+        # ATS9371/ATS9373 replace the ADC sample LSB with the external-trigger
+        # state while TRIG IN is the trigger source.  Both possible trigger
+        # states therefore map to the midpoint of the same effective 11-bit
+        # quantization bin.  The half-code midpoint avoids adding a constant
+        # negative half-LSB bias after discarding the corrupted bit.
+        codes = np.floor(codes / 2.0) * 2.0 + 0.5
     code_midpoint = float(1 << (bits_per_sample - 1))
     return (codes - code_midpoint) * (input_range_volts / code_midpoint)
-
-
-def demodulate_tone(
-    records_volts: npt.NDArray[np.float64],
-    sample_rate_hz: float,
-    tone_frequency_hz: float,
-) -> npt.NDArray[np.complex128]:
-    return _dispersive_demodulate(
-        records_volts, sample_rate_hz, tone_frequency_hz
-    )
-
-
-def estimate_peak_frequency(
-    records_volts: npt.NDArray[np.float64], sample_rate_hz: float
-) -> npt.NDArray[np.float64]:
-    centered = records_volts - records_volts.mean(axis=1, keepdims=True)
-    spectrum = np.abs(np.fft.rfft(centered, axis=1))
-    frequencies = np.fft.rfftfreq(records_volts.shape[1], 1.0 / sample_rate_hz)
-    peak_indices = np.argmax(spectrum[:, 1:], axis=1) + 1
-    return frequencies[peak_indices]
-
-
-def analyze_tone(
-    records_volts: npt.NDArray[np.float64],
-    sample_rate_hz: float,
-    tone_frequency_hz: float,
-) -> ToneAnalysis:
-    complex_amplitude = demodulate_tone(
-        records_volts, sample_rate_hz, tone_frequency_hz
-    )
-    return ToneAnalysis(
-        complex_amplitude=complex_amplitude,
-        amplitude_volts=np.abs(complex_amplitude),
-        phase_radians=np.angle(complex_amplitude),
-        peak_frequency_hz=estimate_peak_frequency(records_volts, sample_rate_hz),
-    )

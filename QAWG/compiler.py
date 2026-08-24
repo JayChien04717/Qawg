@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import product
-from typing import Any, Union
+from typing import Any, Protocol, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -13,10 +13,11 @@ from .awg5200.waveforms import (
     MIN_WAVEFORM_SAMPLES,
     constant,
     cosine_square,
+    exponential_decay,
+    exponential_rise,
     gaussian,
     gaussian_square,
     modulate_envelope,
-    trigger_channel_for,
 )
 
 ns = 1e-9
@@ -128,8 +129,8 @@ class ReadoutDeclaration:
     waveform_channel: int | None
     marker_channel: int
     marker_number: int = 1
-    marker_length_s: float | None = None
-    marker_padding_s: float = 500 * ns
+    marker_length_s: float = 40 * ns
+    marker_lead_s: float = 500 * ns
     marker_low_volts: float = 0.0
     marker_high_volts: float = 1.2
     integrate_time_s: float | None = None
@@ -211,6 +212,7 @@ class ExperimentResult:
     marker_windows_s: npt.NDArray[np.float64] | None = None
     acquire_window_s: float | None = None
     remove_dc_offset: bool = False
+    external_trigger_lsb_masked: bool = False
 
     def _check_readout(self, readout: str) -> None:
         if readout != self.readout_name:
@@ -219,29 +221,31 @@ class ExperimentResult:
     def axis(self, name: str) -> npt.NDArray[Any]:
         return self.axes[name].copy()
 
-    def trace_average(self, readout: str = "ro") -> npt.NDArray[np.float64]:
-        from .averager import trace_average
-
-        return trace_average(self, readout)
-
-    def iq_trace_average(
-        self, readout: str = "ro"
-    ) -> npt.NDArray[np.complex128]:
-        from .averager import iq_trace_average
-
-        return iq_trace_average(self, readout)
-
-    def shots(self, readout: str = "ro") -> npt.NDArray[np.complex128]:
-        from .averager import shots
-
-        return shots(self, readout)
+    def raw_average(self, readout: str = "ro") -> npt.NDArray[np.float64]:
+        self._check_readout(readout)
+        return np.mean(self.raw, axis=0)
 
     def iq_average(
         self, readout: str = "ro"
     ) -> npt.NDArray[np.complex128]:
-        from .averager import iq_average
+        self._check_readout(readout)
+        return np.mean(self.iq_traces, axis=0)
 
-        return iq_average(self, readout)
+    def s21(self, readout: str = "ro") -> npt.NDArray[np.complex128]:
+        self._check_readout(readout)
+        return np.mean(self.iq_shots, axis=0)
+
+
+class ExperimentHardware(Protocol):
+    """Coordinator surface used only by compatibility convenience methods."""
+
+    def upload_compiled_experiment(self, compiled: "CompiledExperiment") -> str: ...
+
+    def acquire_compiled_experiment(
+        self,
+        compiled: "CompiledExperiment",
+        n_average: int,
+    ) -> ExperimentResult: ...
 
 
 @dataclass
@@ -260,7 +264,7 @@ class CompiledExperiment:
     trigger_delay_s: float
     channel_amplitudes_vpp: dict[int, float]
     remove_dc_offset: bool = False
-    _hardware: Any | None = None
+    _hardware: ExperimentHardware | None = None
 
     @property
     def number_of_sequence_steps(self) -> int:
@@ -272,13 +276,13 @@ class CompiledExperiment:
     def preview(self, channel: int) -> npt.NDArray[np.float64]:
         return self.channel_waveforms[channel].copy()
 
-    def bind(self, hardware: Any) -> "CompiledExperiment":
+    def bind(self, hardware: ExperimentHardware) -> "CompiledExperiment":
         self._hardware = hardware
         return self
 
-    def upload(self, hardware: Any | None = None) -> str:
+    def upload(self, hardware: ExperimentHardware | None = None) -> str:
         """Compatibility wrapper delegated to the hardware coordinator."""
-        target = hardware or self._hardware
+        target = self._hardware if hardware is None else hardware
         if target is None:
             raise RuntimeError("Bind an AWGAlazar instance before upload")
         self._hardware = target
@@ -288,10 +292,10 @@ class CompiledExperiment:
         self,
         n_average: int,
         *,
-        hardware: Any | None = None,
+        hardware: ExperimentHardware | None = None,
     ) -> ExperimentResult:
         """Compatibility wrapper delegated to the hardware coordinator."""
-        target = hardware or self._hardware
+        target = self._hardware if hardware is None else hardware
         if target is None:
             raise RuntimeError("Bind an AWGAlazar instance before acquire")
         self._hardware = target
@@ -304,7 +308,17 @@ class CompiledExperiment:
 class ExperimentProgram:
     """Declarative program compiled into an AWG sequence and ATS record plan."""
 
-    REMOVE_DC_OFFSET = False
+    REMOVE_DC_OFFSET = True
+
+    @property
+    def remove_dc_offset(self) -> bool:
+        """Whether each ADC record is centered before demodulation."""
+        return bool(self.REMOVE_DC_OFFSET)
+
+    @remove_dc_offset.setter
+    def remove_dc_offset(self, enabled: bool) -> None:
+        # Preserve compatibility with the legacy uppercase class flag.
+        self.REMOVE_DC_OFFSET = bool(enabled)
 
     def __init__(
         self,
@@ -312,10 +326,13 @@ class ExperimentProgram:
         *,
         name: str | None = None,
         final_delay_s: float = 1 * us,
+        remove_dc_offset: bool | None = None,
     ) -> None:
         self.cfg = cfg
         self.name = name or self.__class__.__name__
         self.final_delay_s = float(final_delay_s)
+        if remove_dc_offset is not None:
+            self.remove_dc_offset = remove_dc_offset
         self.generators: dict[str, GeneratorDeclaration] = {}
         self.readouts: dict[str, ReadoutDeclaration] = {}
         self.sweeps: dict[str, LinearSweep | ValuesSweep] = {}
@@ -353,8 +370,8 @@ class ExperimentProgram:
         waveform_ch: int | None = None,
         marker_channel: int = 1,
         marker_number: int = 1,
-        marker_length: float | None = None,
-        marker_padding: float = 500 * ns,
+        marker_length: float = 40 * ns,
+        marker_lead: float = 500 * ns,
         integrate_time: float | None = None,
     ) -> None:
         if name != "ro":
@@ -369,14 +386,10 @@ class ExperimentProgram:
             raise ValueError(
                 "Readout integrate_time cannot exceed readout length"
             )
-        if waveform_ch is None and marker_length is None:
-            raise ValueError("Provide waveform_ch or marker_length")
-        if waveform_ch is not None and marker_length is not None:
-            raise ValueError("Use waveform_ch or marker_length, not both")
-        if marker_length is not None and marker_length <= 0:
+        if marker_length <= 0:
             raise ValueError("Readout marker_length must be positive")
-        if marker_padding < 0:
-            raise ValueError("Readout marker_padding cannot be negative")
+        if marker_lead < 0:
+            raise ValueError("Readout marker_lead cannot be negative")
         self.readouts[name] = ReadoutDeclaration(
             name=name,
             adc_channel=adc_channel,
@@ -387,10 +400,8 @@ class ExperimentProgram:
             ),
             marker_channel=marker_channel,
             marker_number=marker_number,
-            marker_length_s=(
-                None if marker_length is None else float(marker_length)
-            ),
-            marker_padding_s=float(marker_padding),
+            marker_length_s=float(marker_length),
+            marker_lead_s=float(marker_lead),
             integrate_time_s=(
                 None if integrate_time is None else float(integrate_time)
             ),
@@ -430,11 +441,13 @@ class ExperimentProgram:
             "gaussian",
             "gaussian_square",
             "cosine_square",
-            "exponential",
+            "exponential_decay",
+            "exponential_rise",
         }:
             raise ValueError(
                 "style must be 'const', 'gaussian', 'gaussian_square', "
-                "'cosine_square', or 'exponential'"
+                "'cosine_square', 'exponential_rise', or "
+                "'exponential_decay'"
             )
         self.pulses[name] = PulseDefinition(
             name=name,
@@ -519,8 +532,11 @@ class ExperimentProgram:
             if pulse.definition.is_readout
         ]
         if tagged_starts:
-            padding_s = self.readouts["ro"].marker_padding_s
-            sequence_shift_s = max(0.0, padding_s - min(tagged_starts))
+            marker_lead_s = self.readouts["ro"].marker_lead_s
+            sequence_shift_s = max(
+                0.0,
+                marker_lead_s - min(tagged_starts),
+            )
             if sequence_shift_s:
                 scheduled = tuple(
                     self._shift_scheduled_point(point, sequence_shift_s)
@@ -589,14 +605,14 @@ class ExperimentProgram:
                     point_index, start:stop
                 ] += values
 
-            if readout.waveform_channel is None:
-                active_marker = np.zeros(step_samples, dtype=np.bool_)
-                marker_samples = max(
-                    1,
-                    int(round(readout.marker_length_s * sample_rate_hz)),
-                )
-                active_marker[:marker_samples] = True
-            else:
+            active_marker = np.zeros(step_samples, dtype=np.bool_)
+            marker_samples = max(
+                1,
+                int(round(readout.marker_length_s * sample_rate_hz)),
+            )
+            active_marker[:marker_samples] = True
+
+            if readout.waveform_channel is not None:
                 tagged_readout_pulses = [
                     pulse
                     for pulse in scheduled_point.pulses
@@ -613,32 +629,6 @@ class ExperimentProgram:
                             for pulse in tagged_readout_pulses
                         ),
                     )
-                    marker_start_s = max(
-                        0.0,
-                        min(
-                            pulse.start_s
-                            for pulse in tagged_readout_pulses
-                        )
-                        - readout.marker_padding_s,
-                    )
-                    marker_stop_s = (
-                        max(
-                            pulse.stop_s
-                            for pulse in tagged_readout_pulses
-                        )
-                        + readout.marker_padding_s
-                    )
-                    marker_start = int(
-                        round(marker_start_s * sample_rate_hz)
-                    )
-                    marker_stop = int(
-                        round(marker_stop_s * sample_rate_hz)
-                    )
-                    active_marker = np.zeros(
-                        step_samples,
-                        dtype=np.bool_,
-                    )
-                    active_marker[marker_start:marker_stop] = True
                 else:
                     reference = channel_waveforms[
                         readout.waveform_channel
@@ -647,9 +637,6 @@ class ExperimentProgram:
                     readout_windows_s[point_index] = (
                         active[0] / sample_rate_hz,
                         (active[-1] + 1) / sample_rate_hz,
-                    )
-                    _, active_marker = trigger_channel_for(
-                        reference,
                     )
             if readout.waveform_channel is None:
                 readout_windows_s[point_index] = (
@@ -670,7 +657,7 @@ class ExperimentProgram:
             readout=readout,
             trigger_delay_s=trigger_delay_s,
             channel_amplitudes_vpp=channel_amplitudes,
-            remove_dc_offset=bool(self.REMOVE_DC_OFFSET),
+            remove_dc_offset=self.remove_dc_offset,
             _hardware=hardware,
         )
 
@@ -749,7 +736,7 @@ class ExperimentProgram:
                 for definition in self.pulses.values()
             )
             trigger_delay_s = (
-                readout.marker_padding_s
+                readout.marker_lead_s
                 if event.trigger_delay_s is None and has_tagged_readout
                 else (
                     0.0
@@ -784,13 +771,10 @@ class ExperimentProgram:
                 pulse.start_s for pulse in tagged_readout_pulses
             )
             readout_stop = readout_start + readout.length_s
-            marker_stop = (
-                max(pulse.stop_s for pulse in tagged_readout_pulses)
-                + readout.marker_padding_s
-            )
+            marker_stop = readout.marker_length_s
         elif readout.waveform_channel is None:
             readout_stop = readout.length_s
-            marker_stop = float(readout.marker_length_s)
+            marker_stop = readout.marker_length_s
         else:
             reference_generators = {
                 name
@@ -811,7 +795,7 @@ class ExperimentProgram:
                 min(pulse.start_s for pulse in reference_pulses)
                 + readout.length_s
             )
-            marker_stop = max(pulse.stop_s for pulse in reference_pulses)
+            marker_stop = readout.marker_length_s
         duration_s = max(
             [
                 cursor_s,
@@ -913,14 +897,25 @@ class ExperimentProgram:
                 raise ValueError(
                     "Cosine-square pulse is too short for edge_length"
                 ) from exc
-        else:
+        elif style in {"exponential_rise", "exponential_decay"}:
             decay_s = pulse.decay_s
             if decay_s is None or decay_s <= 0:
                 raise ValueError(
-                    "Exponential pulses require decay > 0"
+                    "Exponential pulses require decay > 0 (the envelope tau)"
                 )
-            time_s = np.arange(count, dtype=np.float64) / sample_rate_hz
-            envelope = pulse.gain * np.exp(-time_s / (2.0 * decay_s))
+            envelope_function = (
+                exponential_rise
+                if style == "exponential_rise"
+                else exponential_decay
+            )
+            envelope = envelope_function(
+                count,
+                sample_rate_hz,
+                decay_s,
+                pulse.gain,
+            )
+        else:  # pragma: no cover - validated by add_pulse
+            raise RuntimeError(f"Unsupported pulse style {style!r}")
 
         waveform = modulate_envelope(
             envelope,

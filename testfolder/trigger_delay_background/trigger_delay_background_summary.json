@@ -1,0 +1,46 @@
+[
+  {
+    "trigger_delay_ns": 0.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.36146875,
+    "background_shot_std_mV": 0.06417727768469066,
+    "background_sem_mV": 0.002029463715127199,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 100.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.39208984375,
+    "background_shot_std_mV": 0.06613628835165178,
+    "background_sem_mV": 0.0020914130718088265,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 200.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.3415,
+    "background_shot_std_mV": 0.0646573707718337,
+    "background_sem_mV": 0.0020446455915699366,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 400.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.41608984375,
+    "background_shot_std_mV": 0.06583899757070853,
+    "background_sem_mV": 0.002082011911857318,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  }
+]

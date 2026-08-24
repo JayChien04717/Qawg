@@ -19,9 +19,9 @@ conversion、digital downconversion、filter、integration 與 multiplex DSP。
 ```text
 alazar/
 ├── ats_api.py       ATSApi.dll ctypes bindings
-├── ats9371.py       board configuration、DMA buffers 與 raw acquisition
-├── demodulation.py  pure NumPy signal-processing functions
-├── processor.py     AlazarProcessor DSP interface
+├── device.py        Alazar9371 capture façade 與 capture contracts
+├── ats9371.py       low-level board configuration 與 DMA primitives
+├── dsp.py           pure NumPy DSP API
 └── constants.py     Alazar SDK constants
 ```
 
@@ -75,9 +75,32 @@ experiment = AWGAlazar.connect(
 `AWGAlazar` 只保留兩個直接 acquisition entry points：
 
 - `acquire_decimate()`：trace/debug mode，回傳 integration window 內的 raw 與
-  low-pass demodulated traces。
-- `acquire()`：averaged/integrated mode，回傳 integration window 內的 per-shot IQ
-  和 mean IQ。
+  FIR low-pass demodulated traces。`AWGAlazar` 預設使用 81-tap、20 MHz
+  Kaiser FIR。舊的 boxcar/filter-mode branch 已移除。
+- `acquire()`：QM-style weighted full demodulation，直接由 raw DDC window 回傳
+  per-shot IQ 和 mean IQ，不先對 time-resolved trace 做 moving average。
+
+`acquire_decimate()` 保留完整 ADC sample grid，不做額外降採樣。
+
+預設 rectangular integration weights；若要使用 Tukey、matched filter 或 IQ
+rotation weights，可在 `AWGAlazar.connect()` 傳入與 integration window 等長的
+real/complex `integration_weights`：
+
+```python
+experiment = AWGAlazar.connect(
+    awg_resource,
+    awg_sample_rate_hz=2.5e9,
+    alazar_sample_rate_hz=1e9,
+    acquire_window_s=1.5e-6,
+    fir_cutoff_hz=20e6,
+    fir_number_of_taps=41,
+    fir_kaiser_beta=6.0,
+    integration_weights=weights,
+)
+```
+
+底層 pure NumPy helpers 為 `design_lowpass_fir()`、`fir_lowpass_iq()`、
+`weighted_integrate_iq()` 與 `weighted_full_demodulate()`。
 
 兩者都會保留 full acquire-window debug data：
 
@@ -119,102 +142,47 @@ shots:  (n_average,)
 mean_iq: scalar complex
 ```
 
-## AlazarProcessor
+## 獨立使用 Alazar 與 DSP
 
-`AlazarProcessor` 只處理已轉成 volts 的 records，不操作硬體：
-
-```python
-from QAWG.alazar import AlazarProcessor
-
-processor = AlazarProcessor(sample_rate_hz=1e9)
-```
-
-### Digital downconversion 與 integration
+Alazar 不需要 AWG 或 QAWG coordinator。外部 trigger source 必須在 DMA start
+之後啟動，因此可透過 `start_callback` 接入任意 pulse source：
 
 ```python
-baseband, shot_iq, average_iq = processor.process_integrate(
-    records_volts=records,
-    tone_frequency_hz=50e6,
-    reference_phase_radians=0.0,
-    integrate_start=100,
-    integrate_stop=1100,
-)
-```
-
-Shape：
-
-```text
-baseband:   (shot, adc_sample)
-shot_iq:    (shot,)
-average_iq: scalar complex
-```
-
-Digital downconversion 使用：
-
-```text
-baseband(t) = 2 * voltage(t) * exp(-i*(2*pi*f*t + reference_phase))
-```
-
-對 real cosine input 而言，factor 2 會保留原始 tone amplitude。
-
-### Time-resolved filtering
-
-```python
-baseband, shot_iq_trace, average_iq_trace = processor.process_decimate(
-    records_volts=records,
-    tone_frequency_hz=50e6,
-    reference_phase_radians=0.0,
-    moving_average_samples=20,
-)
-```
-
-Boxcar 使用 valid moving average，因此 output time axis 比 raw record 短：
-
-```text
-output_samples = adc_samples - moving_average_samples + 1
-```
-
-### Multiplex integration
-
-同一組 raw records 可在多個 frequency 分別 downconvert：
-
-```python
-results = processor.process_multiplex_integrate(
-    records_volts=records,
-    tone_frequencies_hz={
-        "q0": 50e6,
-        "q1": 150e6,
-    },
-    reference_phases_radians={
-        "q0": 0.0,
-        "q1": 0.0,
-    },
-    integrate_start=100,
-    integrate_stop=1100,
+from QAWG.alazar import (
+    Alazar9371,
+    CaptureConfig,
+    downconvert,
+    fir_filter,
+    integrate,
 )
 
-q0_baseband, q0_shots, q0_average = results["q0"]
-q1_baseband, q1_shots, q1_average = results["q1"]
+adc = Alazar9371.connect()
+adc.configure(channel=1, use_external_10mhz_reference=True)
+capture = adc.capture(
+    CaptureConfig(
+        samples_per_record=2048,
+        records_per_acquisition=1000,
+        channel=1,
+    ),
+    start_callback=start_external_trigger_source,
+)
+baseband = downconvert(capture.records_volts, capture.sample_rate_hz, 50e6)
+trace = fir_filter(baseband, capture.sample_rate_hz, cutoff_hz=20e6)
+shots = integrate(baseband, start_sample=100, stop_sample=1100)
 ```
 
-每個 frequency 都從相同的 triggered records 計算，不需要重複 acquisition。
-完整 hardware 範例位於 repository 根目錄的
-[multiplex.ipynb](../../multiplex.ipynb)。
+若需自行控制 arm 與 trigger 時序，可使用：
 
-## Baseline 與 phase processing
+```python
+with adc.arm(capture_config) as armed:
+    armed.start()
+    start_external_trigger_source()
+    capture = armed.collect()
+```
 
-Pure NumPy helpers：
+Canonical DSP API 只有 `downconvert()`、`fir_filter()` 與 `integrate()`。
 
-- `subtract_baseline()`：每個 shot 減去 baseline window 的平均值。
-- `correct_interleaving_offsets()`：校正 ADC interleaving core offsets。
-- `phase_align_iq()`：依 reference window 將每個 shot 旋轉到共同 phase。
-- `recover_coherent_envelope()`：baseline correction、shot phase alignment 與 filtering。
-- `recover_clock_referenced_envelope()`：共用 reference clock 時，不以 noisy
-  shot 自身估計 phase。
-
-若 AWG 與 ATS9371 共用穩定 10 MHz reference，優先考慮
-`recover_clock_referenced_envelope()`，避免逐 shot phase estimation 造成
-正向 magnitude bias。
+`correct_interleaving_offsets()` 保留作為 ATS ADC-core offset correction。
 
 ## Low-level DMA API
 
@@ -223,7 +191,7 @@ Pure NumPy helpers：
 ```python
 from QAWG.alazar import (
     ATSApi,
-    AcquisitionConfig,
+    CaptureConfig,
     abort_capture,
     arm_capture,
     free_capture,
@@ -234,11 +202,10 @@ from QAWG.alazar import (
 
 api = ATSApi()
 board = open_ats9371(api, system_id=1, board_id=1)
-config = AcquisitionConfig(
+config = CaptureConfig(
     sample_rate_hz=1e9,
-    tone_frequency_hz=50e6,
     samples_per_record=1500,
-    num_averages=1000,
+    records_per_acquisition=1000,
     records_per_buffer=100,
     dma_buffer_count=4,
     channel=1,
@@ -272,10 +239,15 @@ experiment.last_time_s
 debug timing、TOF、ring-up/ring-down 和 unexpected trigger alignment。
 `last_shot_iq` 則是 integration window 內積分後的 per-shot IQ。
 
+ATS9371/ATS9373 使用 External Trigger 時會以 trigger state 取代 ADC sample
+的 LSB。`AWGAlazar` 預設以有效 11-bit quantization-bin midpoint 重建該位元，
+避免 marker high/low 在 voltage trace 形成一個 LSB 的背景階梯。只有在檢查
+原始硬體行為時才設定 `mask_external_trigger_lsb=False`。
+
 ## Data ownership
 
 - ATS DMA 與 ADC conversion：`ats9371.py`
-- DSP primitives：`demodulation.py`、`processor.py`
-- Shot integration / averaging：`QAWG.averager`
+- DSP primitives 與 pipelines：`dsp.py`
+- Result averaging：`ExperimentResult` methods
 - AWG start/stop 與 acquisition coordination：`QAWG.awg_alazar.AWGAlazar`
 - Experiment sweep 與 sequence record layout：`QAWG.compiler`

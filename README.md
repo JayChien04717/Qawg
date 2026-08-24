@@ -11,9 +11,8 @@ QAWG/
 ├── timeline.py    hardware-independent waveform timing helpers
 ├── awg5200/       AWG5208 waveform upload、marker、sequence 與 SCPI driver
 ├── alazar/        ATS9371 acquisition、ADC conversion 與 signal processing
-├── averager.py    shot integration、averaging 與 result reductions
 ├── compiler.py    sweep、pulse timing 與實驗規則
-├── awg_alazar.py  AWG 與 Alazar 的執行協調層
+├── awg_alazar.py  AWG 與 Alazar coordination entry point
 └── tomography.py  heterodyne tomography helpers
 ```
 
@@ -22,17 +21,30 @@ QAWG/
 - **Timeline**：手動 waveform timing、parallel waveform 與 delay composition。
 - **Alazar**：擷取與處理 digitized data，包括 demodulation、filter 與
   low-level DMA。
-- **Averager**：integration window 內的 shot IQ、mean IQ 與 result reduction。
+- **Result**：integration window 內的 shot IQ、mean IQ 與 result reduction。
 - **AWG**：上傳 waveform、marker 與 sequence，並管理 AWG5208 hardware。
 - **Compiler**：展開 sweep、驗證 timing，產生不依賴硬體的 compiled plan。
 - **AWGAlazar**：設定兩台儀器、上傳 compiled plan、啟動 acquisition 並組裝結果。
+
+三層可分開使用：
+
+```python
+from QAWG.awg5200 import AWG5208, AWGProgram, AWGStep
+from QAWG.alazar import Alazar9371, CaptureConfig, downconvert, fir_filter, integrate
+from QAWG import AWGAlazar
+```
+
+- `AWG5208.upload_program()` 依 step 數量自行選擇 waveform 或 sequence。
+- `Alazar9371.capture()` 負責 DMA 與 ADC conversion，`alazar.dsp` 負責處理。
+- `AWGAlazar.acquire()` 回傳 integration-window IQ。
+- `AWGAlazar.acquire_decimate()` 回傳 time-resolved raw/IQ waveform。
 
 ## 環境需求
 
 - Windows
 - Python 3.11
 - NumPy
-- SciPy，使用 Butterworth 或 elliptic filter 時需要
+- SciPy，部分 tomography routines 需要
 - PyVISA 與可用的 VISA backend
 - AlazarTech ATS-SDK，以及可載入的 `ATSApi.dll`
 
@@ -150,7 +162,7 @@ qubit_waveforms = compiled.preview(channel=4)
 使用已連接的 `AWGAlazar` 執行實驗：
 
 ```python
-compiled = program.compile(hardware=experiment)
+compiled = experiment.compile(program)
 result = compiled.acquire(n_average=1000)
 ```
 
@@ -165,16 +177,16 @@ result.raw.shape
 result.iq_traces.shape
 # (n_average, P, iq_sample)
 
-result.shots("ro").shape
+result.iq_shots.shape
 # (n_average, P)
 ```
 
 資料預設保留 shot axis，不會自動丟棄 single-shot information。需要平均時：
 
 ```python
-raw_average = result.trace_average("ro")
-iq_trace_average = result.iq_trace_average("ro")
+raw_average = result.raw_average("ro")
 iq_average = result.iq_average("ro")
+s21 = result.s21("ro")
 ```
 
 ## Timing 與 marker

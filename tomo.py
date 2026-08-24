@@ -197,9 +197,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ringdown-fit-ns", type=float, default=250.0)
     parser.add_argument("--readout-ns", type=float, default=1500.0)
     parser.add_argument("--acquire-ns", type=float, default=2304.0)
-    parser.add_argument("--marker-padding-ns", type=float, default=500.0)
+    parser.add_argument("--marker-length-ns", type=float, default=40.0)
+    parser.add_argument("--marker-lead-ns", type=float, default=500.0)
     parser.add_argument("--trigger-delay-ns", type=float, default=580.0)
-    parser.add_argument("--moving-average-ns", type=float, default=20.0)
     parser.add_argument("--shots", type=int, default=1000)
     parser.add_argument(
         "--total-shots",
@@ -356,12 +356,12 @@ def average_window(
 
 
 def steady_state_window(
-    marker_padding_s: float,
+    marker_lead_s: float,
     pulse_length_s: float,
     sample_rate_hz: float,
     fraction: float = 0.25,
 ) -> tuple[int, int]:
-    pulse_stop = marker_padding_s + pulse_length_s
+    pulse_stop = marker_lead_s + pulse_length_s
     pulse_start = pulse_stop - fraction * pulse_length_s
     return (
         int(round(pulse_start * sample_rate_hz)),
@@ -808,7 +808,8 @@ class ScanProgram(ExperimentProgram):
             demod_freq=cfg["if_frequency"],
             waveform_ch=cfg["awg_channel"],
             marker_channel=cfg["marker_channel"],
-            marker_padding=cfg["marker_padding"],
+            marker_length=cfg["marker_length"],
+            marker_lead=cfg["marker_lead"],
             integrate_time=cfg["readout_length"],
         )
         for name, gain in (("reference", 0.0), ("signal", cfg["scan_gain"])):
@@ -844,7 +845,8 @@ class RisingExponentialProgram(ExperimentProgram):
             demod_freq=cfg["if_frequency"],
             waveform_ch=cfg["awg_channel"],
             marker_channel=cfg["marker_channel"],
-            marker_padding=cfg["marker_padding"],
+            marker_length=cfg["marker_length"],
+            marker_lead=cfg["marker_lead"],
             integrate_time=cfg["readout_length"],
         )
         for name, gain in (("reference", 0.0), ("signal", cfg["load_gain"])):
@@ -915,7 +917,8 @@ class SingleHemtTomographyProgram(ExperimentProgram):
             demod_freq=cfg["if_frequency"],
             waveform_ch=cfg["awg_channel"],
             marker_channel=cfg["marker_channel"],
-            marker_padding=cfg["marker_padding"],
+            marker_length=cfg["marker_length"],
+            marker_lead=cfg["marker_lead"],
             integrate_time=cfg["readout_length"],
         )
         for name, gain in (("reference", 0.0), ("signal", cfg["tomo_drive_gain"])):
@@ -942,7 +945,8 @@ def common_program_config(args: argparse.Namespace) -> dict[str, Any]:
         "awg_amplitude_vpp": args.awg_amplitude_vpp,
         "if_frequency": args.if_frequency,
         "readout_length": args.readout_ns * ns,
-        "marker_padding": args.marker_padding_ns * ns,
+        "marker_length": args.marker_length_ns * ns,
+        "marker_lead": args.marker_lead_ns * ns,
         "trigger_delay": args.trigger_delay_ns * ns,
         "scan_gain": args.scan_gain,
         "scan_pulse_length": args.scan_pulse_ns * ns,
@@ -971,7 +975,6 @@ def connect_hardware(
             tone_frequency_hz=args.if_frequency,
             integrate_window_ns=(0.0, args.readout_ns),
             adc_channel="CHB",
-            moving_average_time_s=args.moving_average_ns * ns,
             baseline_time_s=100 * ns,
             timeout_ms=30_000,
         )
@@ -996,7 +999,7 @@ def acquire_frequency_scan(
     program = ScanProgram(config, final_delay_s=args.final_delay_us * us)
     compiled = program.compile(hardware=experiment)
     start, stop = steady_state_window(
-        args.marker_padding_ns * ns,
+        args.marker_lead_ns * ns,
         args.scan_pulse_ns * ns,
         experiment.alazar_sample_rate_hz,
     )
@@ -1182,7 +1185,7 @@ def acquire_rising_exponential(
     result = compiled.acquire(n_average=args.shots)
     reference, signal, raw_reference, raw_signal = split_states(result)
     measured_envelope = mean_difference(reference, signal)
-    pulse_end_s = args.marker_padding_ns * ns + load_duration_s
+    pulse_end_s = args.marker_lead_ns * ns + load_duration_s
     detected_arrival_s = detect_ringdown_start(
         result.iq_time_s,
         measured_envelope,
@@ -1303,7 +1306,7 @@ def prepare_stream_mode(
     result = compiled.acquire(n_average=pilot_count)
     reference, signal, raw_reference, raw_signal = split_states(result)
     measured_envelope = mean_difference(reference, signal)
-    pulse_end_s = args.marker_padding_ns * ns + load_duration_s
+    pulse_end_s = args.marker_lead_ns * ns + load_duration_s
     if args.mode_file is None:
         arrival_s = detect_ringdown_start(
             result.iq_time_s,
@@ -1410,7 +1413,7 @@ def tomography_temporal_mode(
     values = np.zeros(time.size, dtype=np.complex128)
     if args.tomo_mode == "boxcar":
         # CALIBRATE: start after drive transients and stop before drive-off.
-        drive_start_s = args.marker_padding_ns * ns
+        drive_start_s = args.marker_lead_ns * ns
         drive_stop_s = drive_start_s + args.tomo_drive_ns * ns
         if start_s < drive_start_s or stop_s > drive_stop_s:
             raise ValueError("boxcar mode must lie inside the driven pulse")
@@ -2522,7 +2525,7 @@ def simulate_workflow(args: argparse.Namespace, run_dir: Path) -> None:
         2.5e9,
     )
     time_s = np.arange(int(args.acquire_ns), dtype=float) * ns
-    pulse_end = args.marker_padding_ns * ns + load_duration
+    pulse_end = args.marker_lead_ns * ns + load_duration
     envelope = 0.4e-3 * np.exp(
         -(time_s - pulse_end) / fit.amplitude_lifetime_s
         + 2.0j * np.pi * 0.25e6 * (time_s - pulse_end)

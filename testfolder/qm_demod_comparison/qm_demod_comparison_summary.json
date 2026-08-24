@@ -1,0 +1,62 @@
+[
+  {
+    "pulse_length_ns": 100.0,
+    "legacy_peak_mV": 3.2172884710652205,
+    "fir_peak_mV": 3.074171986574901,
+    "legacy_rise_10_90_ns": 29.0,
+    "fir_rise_10_90_ns": 32.0,
+    "legacy_final_abs_mean_mV": 0.15074835252052426,
+    "qm_final_abs_mean_mV": 0.15266766287528594,
+    "final_difference_uV": 1.9676505340129173
+  },
+  {
+    "pulse_length_ns": 200.0,
+    "legacy_peak_mV": 3.23224341729232,
+    "fir_peak_mV": 3.2306066943092953,
+    "legacy_rise_10_90_ns": 30.0,
+    "fir_rise_10_90_ns": 34.0,
+    "legacy_final_abs_mean_mV": 0.474242279244225,
+    "qm_final_abs_mean_mV": 0.4761493999368275,
+    "final_difference_uV": 1.9524697990752844
+  },
+  {
+    "pulse_length_ns": 300.0,
+    "legacy_peak_mV": 3.2309438977748837,
+    "fir_peak_mV": 3.231277847749636,
+    "legacy_rise_10_90_ns": 30.0,
+    "fir_rise_10_90_ns": 34.0,
+    "legacy_final_abs_mean_mV": 0.7968448822537426,
+    "qm_final_abs_mean_mV": 0.7987378496354772,
+    "final_difference_uV": 1.9362234162540137
+  },
+  {
+    "pulse_length_ns": 400.0,
+    "legacy_peak_mV": 3.2337763673110915,
+    "fir_peak_mV": 3.232796796612771,
+    "legacy_rise_10_90_ns": 30.0,
+    "fir_rise_10_90_ns": 34.0,
+    "legacy_final_abs_mean_mV": 1.1197703536106436,
+    "qm_final_abs_mean_mV": 1.121681743113218,
+    "final_difference_uV": 1.9563240171566405
+  },
+  {
+    "pulse_length_ns": 500.0,
+    "legacy_peak_mV": 3.2384184546237074,
+    "fir_peak_mV": 3.237150280378932,
+    "legacy_rise_10_90_ns": 30.0,
+    "fir_rise_10_90_ns": 34.0,
+    "legacy_final_abs_mean_mV": 1.4409013881610595,
+    "qm_final_abs_mean_mV": 1.4427689026076203,
+    "final_difference_uV": 1.901888853719973
+  },
+  {
+    "pulse_length_ns": 600.0,
+    "legacy_peak_mV": 3.2356596824712103,
+    "fir_peak_mV": 3.232739172391665,
+    "legacy_rise_10_90_ns": 30.0,
+    "fir_rise_10_90_ns": 34.0,
+    "legacy_final_abs_mean_mV": 1.7643957760278706,
+    "qm_final_abs_mean_mV": 1.7663036915030748,
+    "final_difference_uV": 1.9504181814425834
+  }
+]

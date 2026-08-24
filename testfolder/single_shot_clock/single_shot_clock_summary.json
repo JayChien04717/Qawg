@@ -1,0 +1,98 @@
+[
+  {
+    "window": "notebook_0_1000",
+    "phase_degrees": 0,
+    "mean_i_mV": -2.1518539101769596,
+    "mean_q_mV": 1.5230304776377246,
+    "mean_amplitude_mV": 2.636303678743643,
+    "radial_std_mV": 0.020958469931028772,
+    "tangential_std_mV": 0.2407812127148828,
+    "phase_std_degrees": 5.224735319788006,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "notebook_0_1000",
+    "phase_degrees": 180,
+    "mean_i_mV": 2.151097622014163,
+    "mean_q_mV": -1.5232318602491772,
+    "mean_amplitude_mV": 2.6358027770516435,
+    "radial_std_mV": 0.020474794622184843,
+    "tangential_std_mV": 0.24146115283059083,
+    "phase_std_degrees": 5.239837999769997,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "signal_250_950",
+    "phase_degrees": 0,
+    "mean_i_mV": -2.649065638847492,
+    "mean_q_mV": 1.8837401301906458,
+    "mean_amplitude_mV": 3.2505423604397383,
+    "radial_std_mV": 0.02514029275588943,
+    "tangential_std_mV": 0.2957054172531217,
+    "phase_std_degrees": 5.203917769366661,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "signal_250_950",
+    "phase_degrees": 180,
+    "mean_i_mV": 2.6480689401141624,
+    "mean_q_mV": -1.8845677617279042,
+    "mean_amplitude_mV": 3.2502099563168936,
+    "radial_std_mV": 0.02461905678936597,
+    "tangential_std_mV": 0.2963496583652959,
+    "phase_std_degrees": 5.215264619960822,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "steady_350_950",
+    "phase_degrees": 0,
+    "mean_i_mV": -2.6483937480596045,
+    "mean_q_mV": 1.8847758618239945,
+    "mean_amplitude_mV": 3.2505952522692794,
+    "radial_std_mV": 0.026625167294966917,
+    "tangential_std_mV": 0.29591421573918614,
+    "phase_std_degrees": 5.207781140627757,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "steady_350_950",
+    "phase_degrees": 180,
+    "mean_i_mV": 2.647145701432612,
+    "mean_q_mV": -1.8855440230370342,
+    "mean_amplitude_mV": 3.2500240964374156,
+    "radial_std_mV": 0.0259808600997399,
+    "tangential_std_mV": 0.2964052095570799,
+    "phase_std_degrees": 5.216291754609604,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "steady_400_800",
+    "phase_degrees": 0,
+    "mean_i_mV": -2.649177684815382,
+    "mean_q_mV": 1.8845732482914157,
+    "mean_amplitude_mV": 3.251116536499337,
+    "radial_std_mV": 0.03206373819796369,
+    "tangential_std_mV": 0.296801626253821,
+    "phase_std_degrees": 5.2231066125468155,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  },
+  {
+    "window": "steady_400_800",
+    "phase_degrees": 180,
+    "mean_i_mV": 2.648161975418943,
+    "mean_q_mV": -1.884151215479352,
+    "mean_amplitude_mV": 3.250044253675183,
+    "radial_std_mV": 0.030047157860727286,
+    "tangential_std_mV": 0.29700503726853966,
+    "phase_std_degrees": 5.2269985473033795,
+    "low_amplitude_shots": 0,
+    "shots": 3000
+  }
+]

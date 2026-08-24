@@ -167,6 +167,32 @@ def cosine_square(
     return envelope
 
 
+def exponential_rise(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    time_constant_s: float,
+    amplitude_volts: float,
+) -> FloatArray:
+    """Return ``A * (1 - exp(-t / tau))`` sampled from zero."""
+    if time_constant_s <= 0:
+        raise ValueError("time_constant_s must be positive")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    return amplitude_volts * (1.0 - np.exp(-time / time_constant_s))
+
+
+def exponential_decay(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    time_constant_s: float,
+    amplitude_volts: float,
+) -> FloatArray:
+    """Return ``A * exp(-t / tau)`` with the requested amplitude lifetime."""
+    if time_constant_s <= 0:
+        raise ValueError("time_constant_s must be positive")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    return amplitude_volts * np.exp(-time / time_constant_s)
+
+
 def gaussian_cosine(
     number_of_samples: int,
     sample_rate_hz: float,

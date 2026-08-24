@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .transport import ScpiTransport, open_visa_transport
+from .models import AWGProgram, UploadedProgram
 from ..timeline import (
     Parallel,
     Timeline,
@@ -269,6 +270,149 @@ class AWG5208:
             amplitude_vpp=amplitude_vpp,
             markers=markers,
             overwrite=overwrite,
+        )
+
+    @staticmethod
+    def _sequence_playback_order(number_of_steps: int) -> tuple[int, ...]:
+        """Map logical steps to the AWG5208's newly assigned playback order."""
+        steps = int(number_of_steps)
+        if steps < 1:
+            raise ValueError("number_of_steps must be positive")
+        # A newly assigned AWG5208 sequence begins at its last programmed
+        # step.  Put logical step zero there so acquisition records remain in
+        # logical order: 0, 1, ..., N-1.
+        return tuple(range(1, steps)) + (0,)
+
+    def upload_program(
+        self,
+        program: AWGProgram,
+        *,
+        clear_before_upload: bool = True,
+        enabled: bool = True,
+    ) -> UploadedProgram:
+        """Upload one logical AWG program as a waveform or a sequence.
+
+        The caller supplies logical steps.  This driver owns marker packing,
+        DAC-resolution selection, and the AWG5208 sequence-order workaround.
+        """
+        if not program.steps:
+            raise ValueError("program must contain at least one step")
+
+        expected_channels = set(program.steps[0].waveforms)
+        if not expected_channels:
+            raise ValueError("every program must drive at least one channel")
+        for channel in expected_channels:
+            validate_channel(channel)
+            if channel not in program.amplitudes_vpp:
+                raise ValueError(f"missing amplitude_vpp for channel {channel}")
+            amplitude = float(program.amplitudes_vpp[channel])
+            if not 0.25 <= amplitude <= 1.5:
+                raise ValueError(
+                    "AWG5208 amplitude must be between 0.25 and 1.5 Vpp"
+                )
+        for step in program.steps:
+            if set(step.waveforms) != expected_channels:
+                raise ValueError("every AWG step must contain the same channels")
+            if not set(step.markers).issubset(expected_channels):
+                raise ValueError("markers must belong to a waveform channel")
+            for channel, waveform in step.waveforms.items():
+                sample_count = np.asarray(waveform).size
+                markers = tuple(step.markers.get(channel, ()))
+                if len(markers) > 4:
+                    raise ValueError("AWG5208 supports at most four marker bits")
+                if any(np.asarray(marker).size != sample_count for marker in markers):
+                    raise ValueError("marker arrays must match their waveform length")
+        marker_counts = {
+            channel: max(
+                len(tuple(step.markers.get(channel, ())))
+                for step in program.steps
+            )
+            for channel in expected_channels
+        }
+        for (channel, marker), levels in program.marker_levels.items():
+            if channel not in expected_channels:
+                raise ValueError("marker level channel is not in the program")
+            if not 1 <= marker <= 4:
+                raise ValueError("marker must be between 1 and 4")
+            if marker > marker_counts[channel]:
+                raise ValueError("marker level has no matching marker data")
+            if len(levels) != 2 or levels[0] >= levels[1]:
+                raise ValueError("marker low level must be below its high level")
+
+        step_count = len(program.steps)
+        if isinstance(program.repetitions, int):
+            if program.repetitions < 1:
+                raise ValueError("repetitions must be positive")
+        else:
+            if len(program.repetitions) != step_count or any(
+                value < 1 for value in program.repetitions
+            ):
+                raise ValueError(
+                    "repetitions must provide one positive count per step"
+                )
+        if program.goto_step is not None and not 1 <= program.goto_step <= step_count:
+            raise ValueError("goto_step must refer to an existing program step")
+
+        if clear_before_upload:
+            self.clear_all()
+
+        uploaded: dict[int, list[str]] = {
+            channel: [] for channel in sorted(expected_channels)
+        }
+        for step_index, step in enumerate(program.steps):
+            for channel in sorted(expected_channels):
+                markers = tuple(step.markers.get(channel, ()))
+                waveform_name = self.upload_waveform_asset(
+                    name=f"{program.name}_s{step_index:04d}_ch{channel}",
+                    waveform_volts=step.waveforms[channel],
+                    amplitude_vpp=float(program.amplitudes_vpp[channel]),
+                    markers=markers,
+                )
+                uploaded[channel].append(waveform_name)
+
+        for channel in sorted(expected_channels):
+            self.set_channel_amplitude(
+                channel, float(program.amplitudes_vpp[channel])
+            )
+            self.set_channel_resolution(channel, 16 - marker_counts[channel])
+        for (channel, marker), (low_volts, high_volts) in (
+            program.marker_levels.items()
+        ):
+            self.set_marker_levels(channel, marker, low_volts, high_volts)
+
+        if len(program.steps) == 1:
+            for channel, names in uploaded.items():
+                self.assign_waveform(channel, names[0])
+                self.set_output(channel, enabled)
+            return UploadedProgram(
+                name=program.name,
+                is_sequence=False,
+                waveform_names={
+                    channel: tuple(names) for channel, names in uploaded.items()
+                },
+            )
+
+        order = self._sequence_playback_order(len(program.steps))
+        tracks = {
+            channel: [names[logical_index] for logical_index in order]
+            for channel, names in uploaded.items()
+        }
+        repetitions = program.repetitions
+        if not isinstance(repetitions, int):
+            repetitions = tuple(repetitions[index] for index in order)
+        sequence_name = self.create_sequence(
+            program.name,
+            tracks,
+            repetitions=repetitions,
+            goto_step=program.goto_step,
+            enabled=enabled,
+        )
+        return UploadedProgram(
+            name=sequence_name,
+            is_sequence=True,
+            waveform_names={
+                channel: tuple(names) for channel, names in uploaded.items()
+            },
         )
 
     def create_sequence(

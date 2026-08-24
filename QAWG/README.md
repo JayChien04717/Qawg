@@ -10,10 +10,10 @@ QAWG/
     timeline.py    Hardware-independent waveform timing helpers
     awg5200/       AWG5208 waveform upload, marker, sequence, and driver
     alazar/        ATS9371 acquisition and signal processing
-    averager.py    Shot integration, averaging, and result reductions
-    awg_alazar.py  AWG/Alazar execution coordinator
+    awg_alazar.py  Public AWG/Alazar coordination entry point
     compiler.py    Experiment rules and compiled sequence plan
     tomography.py  Heterodyne tomography helpers
+    Labber_saver.py Raw ADC and FIR-IQ Labber HDF5 writer
 ```
 
 Common imports:
@@ -21,7 +21,7 @@ Common imports:
 ```python
 from QAWG import AWGAlazar, ExperimentProgram, waveform, delay_auto
 from QAWG.awg5200 import gaussian_square_ns
-from QAWG.alazar import AlazarProcessor
+from QAWG.alazar import Alazar9371, CaptureConfig, downconvert, fir_filter, integrate
 ```
 
 ## Layer responsibilities
@@ -74,6 +74,12 @@ It is independent of IQ integration.
 settings. `trigger_level` is the Alazar SDK threshold code from 0 to 255, not
 a voltage value.
 
+ATS9371/ATS9373 replace each 12-bit ADC sample's least-significant bit with
+the external-trigger state. `AWGAlazar` therefore masks that corrupted bit by
+default and maps both trigger states to the center of the same effective
+11-bit quantization bin. Pass `mask_external_trigger_lsb=False` to
+`AWGAlazar.connect(...)` only for raw hardware diagnostics.
+
 Readout processing settings belong to each experiment declaration:
 
 ```python
@@ -83,7 +89,8 @@ self.declare_readout(
     length=cfg["ro_len"],
     demod_freq=cfg["f_res"],
     waveform_ch=cfg["res_ch"],
-    marker_padding=500 * ns,
+    marker_length=40 * ns,
+    marker_lead=500 * ns,
     integrate_time=cfg["integrate_time"],
 )
 ```
@@ -108,19 +115,18 @@ self.add_pulse(
 )
 ```
 
-For a tagged readout pulse, the compiler creates the marker from that pulse
-only. By default the marker begins `500 ns` before the pulse and ends `500 ns`
-after it. If the pulse starts too early to provide the requested pre-padding,
-the compiler shifts the entire shot later while preserving all relative pulse
-timing. `self.trigger("ro")` then uses the marker padding as the initial
-integration delay inside the acquired record. Pass `trigger_delay=...`
+The trigger marker is a fixed pulse at the beginning of every sequence step;
+its width is controlled by `marker_length` and defaults to `40 ns`.
+`marker_lead` independently controls the minimum delay from the marker edge to
+the tagged readout pulse. If a pulse starts too early, the compiler shifts the
+entire shot later while preserving all relative pulse timing. Keeping marker
+width separate from readout timing is important on ATS9371/ATS9373 because the
+external-trigger state replaces the ADC sample LSB. `self.trigger("ro")` uses
+`marker_lead` as the default integration delay. Pass `trigger_delay=...`
 explicitly after measuring the actual hardware time of flight.
 
-Programs without a tagged readout pulse retain the older behavior: the
-compiler uses `waveform_ch` as the marker reference and finds that channel's
-active waveform interval.
-For a marker fixed at the beginning of every sequence step, use
-`marker_length=40 * ns` instead of `waveform_ch`.
+`waveform_ch` may be used together with `marker_length`: the former tracks the
+readout waveform/window and the latter controls only the trigger-pulse width.
 ATS9371 begins the acquire window immediately after receiving the marker.
 `trigger_delay` configures the integration-window offset inside that acquired
 record. The delay must be identical for every sequence step.
@@ -158,7 +164,7 @@ ExperimentProgram.add_pulse()/play()/trigger()
     -> compiled.upload() or compiled.acquire()
     -> AWGAlazar uploads AWG sequence once when needed
     -> AWGAlazar captures ATS acquire-window records
-    -> averager.py integrates shots and performs explicit reductions
+    -> Alazar DSP integrates shots; ExperimentResult performs reductions
 ```
 
 ## Data contract
@@ -178,16 +184,16 @@ result.raw.shape
 result.iq_traces.shape
 # (n_average, P, iq_sample)
 
-result.shots("ro").shape
+result.iq_shots.shape
 # (n_average, P)
 ```
 
 Averaging is explicit:
 
 ```python
-raw_average = result.trace_average("ro")
-iq_trace_average = result.iq_trace_average("ro")
+raw_average = result.raw_average("ro")
 iq_average = result.iq_average("ro")
+s21 = result.s21("ro")
 ```
 
 This is important for single-shot experiments because the compiler does not
@@ -259,19 +265,20 @@ qubit_steps = compiled.preview(channel=4)
 Compile and bind to an existing `AWGAlazar` instance:
 
 ```python
-compiled = program.compile(hardware=experiment)
+compiled = experiment.compile(program)
 result = compiled.acquire(n_average=1000)
 ```
 
-To remove one constant DC offset from every acquired trace before
-downconversion and integration:
+One constant DC offset is removed from every acquired trace by default before
+downconversion and integration. Disable it for a specific program only when
+the raw record mean must be preserved:
 
 ```python
-program.REMOVE_DC_OFFSET = True
-compiled = program.compile(hardware=experiment)
+program = MyProgram(cfg, remove_dc_offset=False)
+compiled = experiment.compile(program)
 ```
 
-This subtracts each trace's full-record mean independently.
+The default behavior subtracts each trace's full-record mean independently.
 
 ## Relative timing
 
@@ -298,9 +305,9 @@ self.play("readout", at=0)
 self.trigger("ro", trigger_delay=650 * ns)
 ```
 
-Here `at` controls pulse placement. The marker follows the active waveform on
-the tagged readout pulse; marker padding and `trigger_delay` are applied
-relative to that marker.
+Here `at` controls pulse placement. The fixed marker begins the sequence step;
+`marker_lead` controls pulse placement relative to it, while `trigger_delay`
+controls the integration window inside the acquired record.
 
 ## Power Rabi
 
@@ -324,11 +331,11 @@ program = PowerRabiProgram({
     "ro_len": 1 * us,
 })
 
-compiled = program.compile(hardware=experiment)
+compiled = experiment.compile(program)
 result = compiled.acquire(n_average=1000)
 
 gain = result.axis("gain")
-iq = result.iq_average("ro")
+iq = result.s21("ro")
 ```
 
 ## T1
@@ -354,9 +361,9 @@ program = T1Program({
     "ro_len": 1 * us,
 })
 
-result = program.compile(hardware=experiment).acquire(n_average=1000)
+result = experiment.compile(program).acquire(n_average=1000)
 delay = result.axis("delay")
-iq = result.iq_average("ro")
+iq = result.s21("ro")
 ```
 
 ## Single shot
@@ -367,17 +374,62 @@ the pi pulse; the `e` step plays it.
 ```python
 from QAWG import SingleShotProgram
 
-compiled = SingleShotProgram(cfg).compile(hardware=experiment)
+program = SingleShotProgram(cfg)
+compiled = experiment.compile(program)
 result = compiled.acquire(n_average=10_000)
 
 states = result.axis("state")
-shots = result.shots("ro")
+shots = result.iq_shots
 
 ground = shots[:, 0]
 excited = shots[:, 1]
 ```
 
 No automatic average is performed by `shots()`.
+
+## Logging to Labber HDF5
+
+Acquisition and file I/O are deliberately separate. `AWGAlazar` only returns
+data; `QAWG.Labber_saver` writes it afterward.
+
+Save time-resolved IF records and complex downconverted waveforms:
+
+```python
+from QAWG.Labber_saver import createLogFile_ForData, getTraceDict
+
+raw_name = "IF raw average"
+iq_name = "Downconverted IQ average"
+dt = np.median(np.diff(result.raw_time_s))
+log = createLogFile_ForData(
+    "tof_waveform",
+    [
+        {"name": raw_name, "unit": "V", "x_name": "Time", "x_unit": "s"},
+        {"name": iq_name, "unit": "V", "complex": True,
+         "x_name": "Time", "x_unit": "s"},
+    ],
+    database_folder=DATA_FOLDER,
+)
+log.addEntry({
+    raw_name: getTraceDict(result.raw_average()[0], x0=0, dx=dt),
+    iq_name: getTraceDict(result.iq_average()[0], x0=0, dx=dt),
+})
+```
+
+Save a scalar sweep axis and complex S21:
+
+```python
+log = createLogFile_ForData(
+    "resonator_s21",
+    [{"name": "S21", "unit": "V", "complex": True, "vector": False}],
+    [{"name": "SGS frequency", "unit": "Hz", "values": frequency_hz}],
+    database_folder=DATA_FOLDER,
+)
+log.addEntry({"S21": resonator_iq})
+```
+
+`database_folder=DATA_FOLDER` makes Labber create:
+`DATA_FOLDER/YYYY/MM/Data_MMDD/<name>.hdf5`. When omitted, Labber's configured
+database folder is used.
 
 ## Current limits
 

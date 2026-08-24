@@ -1,0 +1,54 @@
+[
+  {
+    "trigger_delay_ns": 0.0,
+    "integration_time_ns": 100.0,
+    "waveform_gain": 1.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "raw_window_mean_mV": -0.450375,
+    "raw_window_rms_mV": 0.643419970013754,
+    "integrated_iq_magnitude_mV": 0.021196102314272144,
+    "integrated_iq_phase_rad": 2.4305042708566442,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 100.0,
+    "integration_time_ns": 100.0,
+    "waveform_gain": 1.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "raw_window_mean_mV": -0.45526953125,
+    "raw_window_rms_mV": 0.6484451477335155,
+    "integrated_iq_magnitude_mV": 0.014544456049415292,
+    "integrated_iq_phase_rad": -0.4382848405011234,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 200.0,
+    "integration_time_ns": 100.0,
+    "waveform_gain": 1.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "raw_window_mean_mV": -0.5131171875,
+    "raw_window_rms_mV": 1.8042295989703696,
+    "integrated_iq_magnitude_mV": 2.1985801684085553,
+    "integrated_iq_phase_rad": -0.6105049300132122,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 400.0,
+    "integration_time_ns": 100.0,
+    "waveform_gain": 1.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "raw_window_mean_mV": -0.44965234375,
+    "raw_window_rms_mV": 2.1135936908012667,
+    "integrated_iq_magnitude_mV": 2.824996799386157,
+    "integrated_iq_phase_rad": -0.6142178615665226,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  }
+]

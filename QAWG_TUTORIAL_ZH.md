@@ -146,7 +146,6 @@ experiment = AWGAlazar.connect(
     trigger_delay_s=0.0,
     integrate_window_ns=(0.0, 600.0),
     adc_channel="CHB",
-    moving_average_time_s=20 * ns,
     baseline_time_s=100 * ns,
     timeout_ms=30_000,
 )
@@ -267,7 +266,8 @@ class ReadoutProgram(ExperimentProgram):
             demod_freq=cfg["if_frequency_hz"],
             waveform_ch=cfg["awg_ch"],
             marker_channel=cfg["marker_ch"],
-            marker_padding=cfg["marker_padding"],
+            marker_length=cfg["marker_length"],
+            marker_lead=cfg["marker_lead"],
             integrate_time=cfg["integrate_time"],
         )
         self.add_pulse(
@@ -292,6 +292,7 @@ class ReadoutProgram(ExperimentProgram):
 cfg = {
     "awg_ch": 1,
     "marker_ch": 1,
+    "marker_length": 40 * ns,
     "adc_channel": "CHB",
     "channel_amplitude_vpp": 0.5,
     "if_frequency_hz": 50e6,
@@ -300,7 +301,7 @@ cfg = {
     "trigger_delay": 600 * ns,
     "edge_sigma": 20 * ns,
     "readout_gain": 1.0,
-    "marker_padding": 500 * ns,
+    "marker_lead": 500 * ns,
 }
 
 program = ReadoutProgram(cfg, final_delay_s=1 * us)
@@ -327,7 +328,7 @@ compiled.upload()
 for f in freqlist:
     sgs.frequency = float(f)
     result = compiled.acquire(n_average=1000)
-    iq = result.iq_average("ro")
+    iq = result.s21("ro")
 ```
 
 同一個 `compiled` 物件重複 `acquire()` 時，`AWGAlazar` 會快取已上傳的 compiled plan，不會每次重新 upload AWG waveform。
@@ -343,16 +344,16 @@ result = compiled.acquire(n_average=1000)
 ```text
 result.raw.shape       = (n_average, P, adc_sample)
 result.iq_traces.shape = (n_average, P, adc_sample)
-result.shots().shape   = (n_average, P)
+result.iq_shots.shape = (n_average, P)
 ```
 
 常用 reduction：
 
 ```python
-raw_avg = result.trace_average("ro")
-iq_trace_avg = result.iq_trace_average("ro")
+raw_avg = result.raw_average("ro")
 iq_avg = result.iq_average("ro")
-shots = result.shots("ro")
+s21 = result.s21("ro")
+shots = result.iq_shots
 ```
 
 ### TOF / timing calibration
@@ -387,7 +388,7 @@ resonator_iq = []
 for f in freqlist:
     sgs.frequency = float(f)
     result = compiled.acquire(n_average=1000)
-    resonator_iq.append(result.iq_average("ro")[0])
+    resonator_iq.append(result.s21("ro")[0])
 ```
 
 ## 常見問題
@@ -444,4 +445,3 @@ compiled.acquire(n_average=...)
 - single-shot IQ
 - tomography
 - 已經決定好 integration window 後的正式量測
-

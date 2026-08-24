@@ -7,6 +7,7 @@ from .driver import (
     TriggerSlope,
 )
 from .transport import ScpiTransport, open_visa_transport
+from .models import AWGProgram, AWGStep, UploadedProgram
 from ..timeline import (
     Delay,
     Parallel,
@@ -25,6 +26,8 @@ from .waveforms import (
     constant,
     cosine_square,
     cosine_square_ns,
+    exponential_decay,
+    exponential_rise,
     gaussian,
     gaussian_cosine,
     gaussian_cosine_ns,
@@ -45,6 +48,8 @@ from .waveforms import (
 
 __all__ = [
     "AWG5208",
+    "AWGProgram",
+    "AWGStep",
     "Delay",
     "Parallel",
     "ScpiTransport",
@@ -52,6 +57,7 @@ __all__ = [
     "TriggerConfig",
     "TriggerInput",
     "TriggerSlope",
+    "UploadedProgram",
     "Waveform",
     "align_channel_envelopes",
     "align_channels",
@@ -60,6 +66,8 @@ __all__ = [
     "constant",
     "cosine_square",
     "cosine_square_ns",
+    "exponential_decay",
+    "exponential_rise",
     "delay",
     "delay_auto",
     "gaussian",

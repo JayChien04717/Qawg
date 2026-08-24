@@ -1,0 +1,50 @@
+[
+  {
+    "trigger_delay_ns": 0.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.42832421875000004,
+    "background_shot_std_mV": 0.07068549564889597,
+    "background_sem_mV": 0.002235271637884329,
+    "shared_acquisition": true,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 100.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.43189062500000003,
+    "background_shot_std_mV": 0.07073395820696644,
+    "background_sem_mV": 0.0022368041585317374,
+    "shared_acquisition": true,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 200.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.43071484375,
+    "background_shot_std_mV": 0.06810620718260246,
+    "background_sem_mV": 0.0021537073749234303,
+    "shared_acquisition": true,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  },
+  {
+    "trigger_delay_ns": 400.0,
+    "integration_time_ns": 100.0,
+    "marker_length_ns": 40.0,
+    "n_average": 1000,
+    "background_mean_mV": -0.43062500000000004,
+    "background_shot_std_mV": 0.06713271723681828,
+    "background_sem_mV": 0.0021229229198439113,
+    "shared_acquisition": true,
+    "remove_dc_offset": false,
+    "external_trigger_lsb_masked": true
+  }
+]

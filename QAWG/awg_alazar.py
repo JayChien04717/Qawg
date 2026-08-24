@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
@@ -10,20 +11,16 @@ import numpy.typing as npt
 
 from .alazar import (
     ATSApi,
-    AcquisitionConfig,
-    AlazarProcessor,
+    Alazar9371,
     BoardInfo,
+    CaptureConfig,
+    CaptureData,
     TriggerConfig,
-    abort_capture,
-    adc_codes_to_volts,
-    arm_capture,
-    configure_ats9371,
     correct_interleaving_offsets,
-    digital_downconvert,
-    free_capture,
+    downconvert,
+    fir_filter,
+    integrate,
     open_ats9371,
-    start_capture,
-    wait_for_capture,
 )
 from .alazar.constants import (
     CHANNEL_A,
@@ -33,47 +30,27 @@ from .alazar.constants import (
     TRIGGER_SLOPE_NEGATIVE,
     TRIGGER_SLOPE_POSITIVE,
 )
-from .averager import (
-    average_shots,
-    compiled_averages,
-    integrate_shots,
-    remove_record_dc_offset,
-    validate_average_count,
-)
-from .awg5200 import AWG5208
+from .awg5200 import AWG5208, AWGProgram, AWGStep
 
 if TYPE_CHECKING:
-    from .compiler import CompiledExperiment, ExperimentResult
+    from .compiler import (
+        CompiledExperiment,
+        ExperimentProgram,
+        ExperimentResult,
+    )
 
 
-def seconds_to_samples(duration_s: float, sample_rate_hz: float) -> int:
-    """Convert seconds to the nearest integer sample count."""
-    if duration_s < 0:
-        raise ValueError("duration_s cannot be negative")
-    if sample_rate_hz <= 0:
-        raise ValueError("sample_rate_hz must be positive")
-    return int(round(duration_s * sample_rate_hz))
+def validate_average_count(n_average: int) -> int:
+    averages = int(n_average)
+    if averages < 1:
+        raise ValueError("n_average must be positive")
+    return averages
 
 
-def samples_to_seconds(number_of_samples: int, sample_rate_hz: float) -> float:
-    """Convert a sample count to seconds."""
-    if number_of_samples < 0:
-        raise ValueError("number_of_samples cannot be negative")
-    if sample_rate_hz <= 0:
-        raise ValueError("sample_rate_hz must be positive")
-    return number_of_samples / sample_rate_hz
-
-
-def records_per_buffer_for(num_averages: int, maximum: int = 100) -> int:
-    """Choose the largest small DMA buffer that divides num_averages."""
-    if num_averages < 1:
-        raise ValueError("num_averages must be positive")
-    if maximum < 1:
-        raise ValueError("maximum must be positive")
-    for candidate in range(min(num_averages, maximum), 0, -1):
-        if num_averages % candidate == 0:
-            return candidate
-    raise RuntimeError("No records_per_buffer divisor found")
+def remove_record_dc_offset(
+    records: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    return records - np.mean(records, axis=1, keepdims=True)
 
 
 def normalize_adc_channel(channel: str | int) -> int:
@@ -125,7 +102,10 @@ class AWGAlazar:
         integrate_time_s: float | None = None,
         integrate_window_ns: tuple[float, float] | None = None,
         adc_channel: str | int = "CHA",
-        moving_average_time_s: float = 20e-9,
+        fir_cutoff_hz: float = 20e6,
+        fir_number_of_taps: int = 41,
+        fir_kaiser_beta: float = 6.0,
+        integration_weights: npt.ArrayLike | None = None,
         reference_phase_radians: float = 0.0,
         trigger_slope: str | int = "rising",
         trigger_level: int = 140,
@@ -135,10 +115,13 @@ class AWGAlazar:
         maximum_records_per_buffer: int = 100,
         use_external_10mhz_reference: bool = True,
         baseline_time_s: float | None = None,
+        mask_external_trigger_lsb: bool = True,
+        remove_dc_offset: bool = True,
     ) -> None:
         self.awg = awg
         self.ats_api = ats_api
         self.ats_board = ats_board
+        self.alazar = Alazar9371(ats_api, ats_board)
         self.awg_sample_rate_hz = float(awg_sample_rate_hz)
         self.alazar_sample_rate_hz = float(alazar_sample_rate_hz)
         self.tone_frequency_hz = float(tone_frequency_hz)
@@ -167,7 +150,14 @@ class AWGAlazar:
             self.integrate_time_s = self.acquire_window_ns * 1e-9
             self.integrate_window_ns = (0.0, self.acquire_window_ns)
         self.adc_channel = normalize_adc_channel(adc_channel)
-        self.moving_average_time_s = float(moving_average_time_s)
+        self.fir_cutoff_hz = float(fir_cutoff_hz)
+        self.fir_number_of_taps = int(fir_number_of_taps)
+        self.fir_kaiser_beta = float(fir_kaiser_beta)
+        self.integration_weights = (
+            None
+            if integration_weights is None
+            else np.asarray(integration_weights, dtype=np.complex128).copy()
+        )
         self.reference_phase_radians = float(reference_phase_radians)
         self.trigger_slope = normalize_trigger_slope(trigger_slope)
         self.trigger_level = int(trigger_level)
@@ -177,6 +167,8 @@ class AWGAlazar:
         self.maximum_records_per_buffer = int(maximum_records_per_buffer)
         self.use_external_10mhz_reference = bool(use_external_10mhz_reference)
         self.baseline_time_s = baseline_time_s
+        self.mask_external_trigger_lsb = bool(mask_external_trigger_lsb)
+        self.remove_dc_offset = bool(remove_dc_offset)
 
         self.last_raw_codes: npt.NDArray[np.uint16] | None = None
         self.last_records_volts: npt.NDArray[np.float64] | None = None
@@ -185,11 +177,11 @@ class AWGAlazar:
         ) = None
         self.last_shot_iq: npt.NDArray[np.complex128] | None = None
         self.last_time_s: npt.NDArray[np.float64] | None = None
-        self._uploaded_compiled: CompiledExperiment | None = None
+        self.last_capture: CaptureData | None = None
+        self._uploaded_compiled_key: str | None = None
         self._uploaded_sequence_name: str | None = None
 
         self._validate_settings()
-        self.processor = AlazarProcessor(self.alazar_sample_rate_hz)
 
     @classmethod
     def connect(
@@ -270,10 +262,12 @@ class AWGAlazar:
             raise ValueError(
                 "integrate_window_ns must fit inside acquire_window_ns"
             )
-        if not 0 < self.moving_average_time_s * 1e9 <= self.acquire_window_ns:
-            raise ValueError(
-                "moving_average_time_s must fit inside acquire_window_ns"
-            )
+        if not 0 < self.fir_cutoff_hz < self.alazar_sample_rate_hz / 2:
+            raise ValueError("fir_cutoff_hz must be between DC and Nyquist")
+        if self.fir_number_of_taps < 3 or self.fir_number_of_taps % 2 == 0:
+            raise ValueError("fir_number_of_taps must be odd and at least 3")
+        if self.fir_kaiser_beta < 0:
+            raise ValueError("fir_kaiser_beta cannot be negative")
         if self.baseline_time_s is not None:
             if not 0 < self.baseline_time_s * 1e9 <= self.acquire_window_ns:
                 raise ValueError(
@@ -315,16 +309,6 @@ class AWGAlazar:
         aligned = ((requested + alignment - 1) // alignment) * alignment
         return max(aligned, MIN_SAMPLES_PER_RECORD)
 
-    @property
-    def moving_average_samples(self) -> int:
-        samples = self.ns2cycles(
-            self.moving_average_time_s * 1e9,
-            inst="adc",
-        )
-        if samples < 1:
-            raise ValueError("moving_average_time_s is shorter than one sample")
-        return samples
-
     def _sample_rate_for(self, inst: str) -> float:
         instrument = inst.lower()
         if instrument == "dac":
@@ -335,17 +319,15 @@ class AWGAlazar:
 
     def ns2cycles(self, duration_ns: float, inst: str = "dac") -> int:
         """Convert nanoseconds to AWG DAC or Alazar ADC sample cycles."""
-        return seconds_to_samples(
-            duration_ns * 1e-9,
-            self._sample_rate_for(inst),
-        )
+        if duration_ns < 0:
+            raise ValueError("duration_ns cannot be negative")
+        return int(round(duration_ns * 1e-9 * self._sample_rate_for(inst)))
 
     def cycles2ns(self, cycles: int, inst: str = "dac") -> float:
         """Convert AWG DAC or Alazar ADC sample cycles to nanoseconds."""
-        return samples_to_seconds(
-            cycles,
-            self._sample_rate_for(inst),
-        ) * 1e9
+        if cycles < 0:
+            raise ValueError("cycles cannot be negative")
+        return cycles / self._sample_rate_for(inst) * 1e9
 
     def configure(self) -> None:
         """Configure clocks, AWG mode/sample rate, and current ATS settings."""
@@ -353,10 +335,8 @@ class AWGAlazar:
         if self.use_external_10mhz_reference:
             self.awg.use_external_10mhz_reference()
         self.awg.set_sample_rate(self.awg_sample_rate_hz)
-        configure_ats9371(
-            self.ats_api,
-            self.ats_board,
-            TriggerConfig(
+        self.alazar.configure(
+            trigger=TriggerConfig(
                 slope=self.trigger_slope,
                 level=self.trigger_level,
                 delay_samples=0,
@@ -365,6 +345,10 @@ class AWGAlazar:
             use_external_10mhz_reference=self.use_external_10mhz_reference,
             channel=self.adc_channel,
         )
+
+    def compile(self, program: "ExperimentProgram") -> "CompiledExperiment":
+        """Compile and bind a program using this connected hardware setup."""
+        return program.compile(hardware=self)
 
     def configure_experiment(
         self,
@@ -384,10 +368,8 @@ class AWGAlazar:
         )
         self.adc_channel = normalize_adc_channel(adc_channel)
         self._validate_settings()
-        configure_ats9371(
-            self.ats_api,
-            self.ats_board,
-            TriggerConfig(
+        self.alazar.configure(
+            trigger=TriggerConfig(
                 slope=self.trigger_slope,
                 level=self.trigger_level,
                 delay_samples=0,
@@ -411,115 +393,69 @@ class AWGAlazar:
         )
 
     @staticmethod
-    def _awg_sequence_order(number_of_steps: int) -> tuple[int, ...]:
-        """Map physical AWG steps to logical compiler points.
-
-        AWG5208 begins a newly assigned sequence at its last programmed step.
-        Programming logical points ``1..N-1, 0`` therefore makes the first
-        emitted record logical point zero, followed by normal logical order.
-        """
-        steps = int(number_of_steps)
-        if steps < 1:
-            raise ValueError("number_of_steps must be positive")
-        return tuple(range(1, steps)) + (0,)
+    def _compiled_key(compiled: "CompiledExperiment") -> str:
+        """Fingerprint mutable ndarray content so stale uploads are detected."""
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(compiled.program_name.encode("utf-8"))
+        digest.update(repr(compiled.readout).encode("utf-8"))
+        digest.update(repr(sorted(compiled.channel_amplitudes_vpp.items())).encode())
+        for channel, values in sorted(compiled.channel_waveforms.items()):
+            array = np.ascontiguousarray(values)
+            digest.update(str(channel).encode())
+            digest.update(str(array.shape).encode())
+            digest.update(array.dtype.str.encode())
+            digest.update(array.tobytes())
+        markers = np.ascontiguousarray(compiled.marker_waveforms)
+        digest.update(str(markers.shape).encode())
+        digest.update(markers.tobytes())
+        return digest.hexdigest()
 
     def upload_compiled_experiment(
         self,
         compiled: "CompiledExperiment",
     ) -> str:
-        """Materialize and upload one compiler-generated AWG sequence plan."""
-        self.awg.clear_all()
-        tracks: dict[int, list[str]] = {
-            channel: [] for channel in compiled.channel_waveforms
-        }
-        tracks.setdefault(compiled.readout.marker_channel, [])
-
+        """Translate a compiled plan and let the AWG choose waveform/sequence."""
+        marker_channel = compiled.readout.marker_channel
+        channels = set(compiled.channel_waveforms)
+        channels.add(marker_channel)
+        amplitudes_vpp = dict(compiled.channel_amplitudes_vpp)
+        amplitudes_vpp.setdefault(marker_channel, 0.5)
+        steps: list[AWGStep] = []
         for step_index in range(compiled.number_of_sequence_steps):
-            for channel, waveforms in compiled.channel_waveforms.items():
-                markers: tuple[npt.NDArray[np.bool_], ...] = ()
-                if channel == compiled.readout.marker_channel:
-                    markers = self._compiled_marker_tuple(
-                        compiled,
-                        step_index,
+            steps.append(
+                AWGStep(
+                    waveforms={
+                        channel: (
+                            compiled.channel_waveforms[channel][step_index]
+                            if channel in compiled.channel_waveforms
+                            else np.zeros(compiled.marker_waveforms.shape[1])
+                        )
+                        for channel in channels
+                    },
+                    markers={
+                        marker_channel: self._compiled_marker_tuple(
+                            compiled, step_index
+                        )
+                    },
+                )
+            )
+
+        uploaded = self.awg.upload_program(
+            AWGProgram(
+                name=compiled.program_name,
+                steps=tuple(steps),
+                amplitudes_vpp=amplitudes_vpp,
+                marker_levels={
+                    (marker_channel, compiled.readout.marker_number): (
+                        compiled.readout.marker_low_volts,
+                        compiled.readout.marker_high_volts,
                     )
-                asset_name = self.awg.upload_waveform_asset(
-                    name=(
-                        f"{compiled.program_name}_s{step_index:04d}"
-                        f"_ch{channel}"
-                    ),
-                    waveform_volts=waveforms[step_index],
-                    amplitude_vpp=compiled.channel_amplitudes_vpp[channel],
-                    markers=markers,
-                )
-                tracks[channel].append(asset_name)
-
-            marker_channel = compiled.readout.marker_channel
-            if marker_channel not in compiled.channel_waveforms:
-                zero = np.zeros(compiled.marker_waveforms.shape[1])
-                asset_name = self.awg.upload_waveform_asset(
-                    name=(
-                        f"{compiled.program_name}_s{step_index:04d}_marker"
-                    ),
-                    waveform_volts=zero,
-                    amplitude_vpp=0.5,
-                    markers=self._compiled_marker_tuple(
-                        compiled,
-                        step_index,
-                    ),
-                )
-                tracks[marker_channel].append(asset_name)
-
-        for channel, amplitude_vpp in (
-            compiled.channel_amplitudes_vpp.items()
-        ):
-            self.awg.set_channel_amplitude(channel, amplitude_vpp)
-            self.awg.set_channel_resolution(
-                channel,
-                16 - compiled.readout.marker_number
-                if channel == compiled.readout.marker_channel
-                else 16,
+                },
             )
-        if (
-            compiled.readout.marker_channel
-            not in compiled.channel_amplitudes_vpp
-        ):
-            self.awg.set_channel_amplitude(
-                compiled.readout.marker_channel,
-                0.5,
-            )
-            self.awg.set_channel_resolution(
-                compiled.readout.marker_channel,
-                16 - compiled.readout.marker_number,
-            )
-        self.awg.set_marker_levels(
-            compiled.readout.marker_channel,
-            compiled.readout.marker_number,
-            compiled.readout.marker_low_volts,
-            compiled.readout.marker_high_volts,
         )
-
-        # AWG5208 starts a newly assigned sequence from the last programmed
-        # step. Rotate the physical list so that this last step is logical
-        # point zero; subsequent playback then follows logical point order.
-        physical_order = self._awg_sequence_order(
-            compiled.number_of_sequence_steps
-        )
-        sequence_tracks = {
-            channel: [
-                waveform_names[logical_index]
-                for logical_index in physical_order
-            ]
-            for channel, waveform_names in tracks.items()
-        }
-        sequence_name = self.awg.create_sequence(
-            compiled.program_name,
-            tracks=sequence_tracks,
-            repetitions=1,
-            goto_step=1,
-        )
-        self._uploaded_compiled = compiled
-        self._uploaded_sequence_name = sequence_name
-        return sequence_name
+        self._uploaded_compiled_key = self._compiled_key(compiled)
+        self._uploaded_sequence_name = uploaded.name if uploaded.is_sequence else None
+        return uploaded.name
 
     def acquire_compiled_experiment(
         self,
@@ -540,16 +476,17 @@ class AWGAlazar:
             integrate_time_s=integrate_time_s,
             adc_channel=compiled.readout.adc_channel,
         )
-        if self._uploaded_compiled is not compiled:
+        if self._uploaded_compiled_key != self._compiled_key(compiled):
             self.upload_compiled_experiment(compiled)
 
         steps = compiled.number_of_sequence_steps
         averages = validate_average_count(n_average)
-        records = self._capture_records(n_average=steps * averages)
-        if getattr(compiled, "remove_dc_offset", False):
-            records = remove_record_dc_offset(records)
-            self.last_records_volts = records
-        baseband = digital_downconvert(
+        capture = self._capture_data(
+            n_average=steps * averages,
+            remove_dc_offset=compiled.remove_dc_offset,
+        )
+        records = capture.records_volts
+        baseband = downconvert(
             records,
             self.alazar_sample_rate_hz,
             self.tone_frequency_hz,
@@ -565,25 +502,33 @@ class AWGAlazar:
             / self.alazar_sample_rate_hz
         )
         integration_window = self._integration_slice(downconverted.shape[1])
-        averaged = compiled_averages(
-            records=records,
-            downconverted=downconverted,
-            number_of_steps=steps,
-            n_average=averages,
-            integration_window=integration_window,
+        weighted_shots = integrate(
+            baseband,
+            integration_window.start,
+            integration_window.stop,
+            self.integration_weights,
+        )
+        raw_by_point = records.reshape(
+            averages,
+            steps,
+            records.shape[1],
+        )
+        iq_by_point = downconverted.reshape(
+            averages,
+            steps,
+            downconverted.shape[1],
         )
         self.last_downconverted_iq = downconverted
-        self.last_shot_iq = integrate_shots(downconverted, integration_window)
+        self.last_shot_iq = weighted_shots
         self.last_time_s = iq_time_s
 
-        marker_waveforms = getattr(compiled, "marker_waveforms", None)
         marker_windows_s = None
-        if marker_waveforms is not None:
+        if compiled.marker_waveforms is not None:
             marker_windows_s = np.zeros(
                 (compiled.number_of_sequence_steps, 2),
                 dtype=np.float64,
             )
-            for step_index, marker in enumerate(marker_waveforms):
+            for step_index, marker in enumerate(compiled.marker_waveforms):
                 active = np.flatnonzero(marker)
                 if active.size:
                     marker_windows_s[step_index] = (
@@ -596,84 +541,57 @@ class AWGAlazar:
                 for name, values in compiled.axes.items()
             },
             point_coordinates=compiled.point_coordinates,
-            raw=averaged.raw.copy(),
-            iq_traces=averaged.iq_traces.copy(),
-            iq_shots=averaged.iq_shots,
+            raw=raw_by_point.copy(),
+            iq_traces=iq_by_point.copy(),
+            iq_shots=weighted_shots.reshape(averages, steps),
             raw_time_s=raw_time_s,
             iq_time_s=iq_time_s,
             readout_name=compiled.readout.name,
             initial_trigger_delay_s=compiled.trigger_delay_s,
             readout_windows_s=(
-                None
-                if not hasattr(compiled, "readout_windows_s")
-                else compiled.readout_windows_s.copy()
+                compiled.readout_windows_s.copy()
             ),
             marker_windows_s=marker_windows_s,
             acquire_window_s=self.acquire_window_ns * 1e-9,
-            remove_dc_offset=getattr(
-                compiled,
-                "remove_dc_offset",
-                False,
-            ),
+            remove_dc_offset=compiled.remove_dc_offset,
+            external_trigger_lsb_masked=self.mask_external_trigger_lsb,
         )
 
-    def _acquisition_config(self, n_average: int) -> AcquisitionConfig:
-        num_averages = int(n_average)
-        if num_averages < 1:
-            raise ValueError("n_average must be positive")
-        return AcquisitionConfig(
-            sample_rate_hz=self.alazar_sample_rate_hz,
-            tone_frequency_hz=self.tone_frequency_hz,
+    def _acquisition_config(self, n_average: int) -> CaptureConfig:
+        num_averages = validate_average_count(n_average)
+        return CaptureConfig(
             samples_per_record=self.acquire_window_cycles,
-            num_averages=num_averages,
-            records_per_buffer=records_per_buffer_for(
-                num_averages,
-                self.maximum_records_per_buffer,
-            ),
+            records_per_acquisition=num_averages,
+            sample_rate_hz=self.alazar_sample_rate_hz,
+            maximum_records_per_buffer=self.maximum_records_per_buffer,
             dma_buffer_count=self.dma_buffer_count,
             input_range_volts=self.input_range_volts,
             timeout_ms=self.timeout_ms,
             channel=self.adc_channel,
+            mask_external_trigger_lsb=self.mask_external_trigger_lsb,
         )
 
-    def _capture_records(
+    def _capture_data(
         self,
         n_average: int,
-    ) -> npt.NDArray[np.float64]:
+        *,
+        remove_dc_offset: bool = False,
+    ) -> CaptureData:
         config = self._acquisition_config(n_average=n_average)
         if self._uploaded_sequence_name is None:
             self.awg.stop()
         else:
-            rewind = getattr(self.awg, "rewind_sequence", None)
-            if rewind is None:
-                # Notebook kernels can contain an AWG5208 instance created
-                # before the driver module was reloaded. Stopping is safe and
-                # avoids an AttributeError; recreate the hardware connection
-                # to obtain the full sequence-rewind behavior.
-                self.awg.stop()
-            else:
-                rewind(self._uploaded_sequence_name)
-        session = arm_capture(self.ats_api, self.ats_board, config)
+            self.awg.rewind_sequence(self._uploaded_sequence_name)
         try:
-            start_capture(self.ats_api, session)
-            self.awg.run(wait_until_ready=False)
-            raw_codes = wait_for_capture(
-                self.ats_api,
-                session,
-                config.timeout_ms,
+            capture = self.alazar.capture(
+                config,
+                start_callback=lambda: self.awg.run(wait_until_ready=False),
             )
         finally:
             with suppress(Exception):
                 self.awg.stop()
-            with suppress(Exception):
-                abort_capture(self.ats_api, session)
-            free_capture(session)
 
-        records = adc_codes_to_volts(
-            raw_codes,
-            self.ats_board.bits_per_sample,
-            config.input_range_volts,
-        )
+        records = capture.records_volts
         if self.baseline_time_s is not None:
             records = correct_interleaving_offsets(
                 records,
@@ -683,10 +601,19 @@ class AWGAlazar:
                 ),
                 period=2,
             )
+        if remove_dc_offset:
+            records = remove_record_dc_offset(records)
+        if records is not capture.records_volts:
+            capture = CaptureData(
+                raw_codes=capture.raw_codes,
+                records_volts=records,
+                sample_rate_hz=capture.sample_rate_hz,
+            )
 
-        self.last_raw_codes = raw_codes
+        self.last_capture = capture
+        self.last_raw_codes = capture.raw_codes
         self.last_records_volts = records
-        return records
+        return capture
 
     def _integration_slice(self, number_of_samples: int) -> slice:
         start, stop = self.integrate_window_cycles
@@ -694,96 +621,94 @@ class AWGAlazar:
             raise ValueError("integration window is outside the acquired record")
         return slice(start, stop)
 
-    def _record_time_axis(self, number_of_samples: int) -> npt.NDArray[np.float64]:
-        return (
-            np.arange(number_of_samples, dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
-
     def _lowpass_downconverted_iq(
         self,
         baseband: npt.NDArray[np.complex128],
     ) -> npt.NDArray[np.complex128]:
-        window_samples = self.moving_average_samples
-        if window_samples <= 1:
-            return baseband.copy()
-        if window_samples > baseband.shape[1]:
-            raise ValueError("moving_average_samples must fit inside the record length")
-        left = (window_samples - 1) // 2
-        right = window_samples // 2
-        padded = np.pad(baseband, ((0, 0), (left, right)), mode="edge")
-        cumulative = np.pad(
-            np.cumsum(padded, axis=1),
-            ((0, 0), (1, 0)),
+        return fir_filter(
+            baseband,
+            self.alazar_sample_rate_hz,
+            self.fir_cutoff_hz,
+            self.fir_number_of_taps,
+            self.fir_kaiser_beta,
         )
-        return (
-            cumulative[:, window_samples:]
-            - cumulative[:, :-window_samples]
-        ) / window_samples
 
     def acquire_decimate(
         self,
         n_average: int,
         *,
-        remove_dc_offset: bool = False,
+        remove_dc_offset: bool | None = None,
     ) -> tuple[
         npt.NDArray[np.float64],
         npt.NDArray[np.float64],
         npt.NDArray[np.complex128],
     ]:
-        """Return raw and low-pass downconverted traces inside the integration window."""
-        records = self._capture_records(n_average=n_average)
-        if remove_dc_offset:
-            records = remove_record_dc_offset(records)
-            self.last_records_volts = records
-        baseband = digital_downconvert(
-            records,
-            self.alazar_sample_rate_hz,
+        """Return full-rate raw and FIR-filtered time-resolved waveforms."""
+        capture = self._capture_data(
+            n_average,
+            remove_dc_offset=(
+                self.remove_dc_offset
+                if remove_dc_offset is None
+                else bool(remove_dc_offset)
+            ),
+        )
+        baseband = downconvert(
+            capture.records_volts,
+            capture.sample_rate_hz,
             self.tone_frequency_hz,
             self.reference_phase_radians,
         )
-        downconverted = self._lowpass_downconverted_iq(baseband)
-        window = self._integration_slice(records.shape[1])
-        time_s = self._record_time_axis(records.shape[1])
-
-        self.last_downconverted_iq = downconverted
-        self.last_shot_iq = integrate_shots(downconverted, window)
-        self.last_time_s = time_s
+        filtered = self._lowpass_downconverted_iq(baseband)
+        window = self._integration_slice(filtered.shape[1])
+        self.last_downconverted_iq = filtered
+        self.last_shot_iq = integrate(
+            baseband,
+            window.start,
+            window.stop,
+            self.integration_weights,
+        )
+        self.last_time_s = capture.time_s
         return (
-            time_s[window],
-            records[:, window].copy(),
-            downconverted[:, window].copy(),
+            capture.time_s[window],
+            capture.records_volts[:, window].copy(),
+            filtered[:, window].copy(),
         )
 
     def acquire(
         self,
         n_average: int,
         *,
-        remove_dc_offset: bool = False,
+        remove_dc_offset: bool | None = None,
     ) -> tuple[
         npt.NDArray[np.complex128],
         np.complex128,
     ]:
         """Return per-shot IQ points and their mean from the integration window."""
-        records = self._capture_records(n_average=n_average)
-        if remove_dc_offset:
-            records = remove_record_dc_offset(records)
-            self.last_records_volts = records
-        window = self._integration_slice(records.shape[1])
-        baseband = digital_downconvert(
-            records,
-            self.alazar_sample_rate_hz,
+        capture = self._capture_data(
+            n_average,
+            remove_dc_offset=(
+                self.remove_dc_offset
+                if remove_dc_offset is None
+                else bool(remove_dc_offset)
+            ),
+        )
+        window = self._integration_slice(capture.records_volts.shape[1])
+        baseband = downconvert(
+            capture.records_volts,
+            capture.sample_rate_hz,
             self.tone_frequency_hz,
             self.reference_phase_radians,
         )
-        downconverted = self._lowpass_downconverted_iq(baseband)
-        shot_iq = integrate_shots(downconverted, window)
-        average_iq = average_shots(shot_iq)
-
-        self.last_downconverted_iq = downconverted
-        self.last_shot_iq = shot_iq
-        self.last_time_s = self._record_time_axis(baseband.shape[1])
-        return shot_iq.copy(), average_iq
+        shots = integrate(
+            baseband,
+            window.start,
+            window.stop,
+            self.integration_weights,
+        )
+        self.last_downconverted_iq = baseband
+        self.last_shot_iq = shots
+        self.last_time_s = capture.time_s
+        return shots.copy(), np.complex128(np.mean(shots))
 
     def close(self) -> None:
         self.awg.close()
