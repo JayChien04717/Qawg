@@ -15,6 +15,7 @@ from .ats_api import ATSApi
 from .constants import (
     ADMA_EXTERNAL_STARTCAPTURE,
     ADMA_NPT,
+    ADMA_INTERLEAVE_SAMPLES,
     ATS9371_BOARD_KIND,
     BW_LIMIT_DISABLE,
     CHANNEL_A,
@@ -94,8 +95,8 @@ class CaptureConfig:
             raise ValueError("ATS9371 is currently configured for +/-400 mV")
         if self.timeout_ms < 1:
             raise ValueError("timeout_ms must be positive")
-        if self.channel not in (CHANNEL_A, CHANNEL_B):
-            raise ValueError("channel must be CHANNEL_A or CHANNEL_B")
+        if self.channel not in (CHANNEL_A, CHANNEL_B, CHANNEL_A | CHANNEL_B):
+            raise ValueError("channel must be CHANNEL_A, CHANNEL_B, or CHANNEL_A | CHANNEL_B")
         if self.records_per_buffer is not None:
             count = int(self.records_per_buffer)
             if count < 1 or self.records_per_acquisition % count:
@@ -103,6 +104,10 @@ class CaptureConfig:
                     "records_per_buffer must divide records_per_acquisition"
                 )
             object.__setattr__(self, "records_per_buffer", count)
+
+    @property
+    def channels(self) -> tuple[int, ...]:
+        return tuple(ch for ch in (CHANNEL_A, CHANNEL_B) if self.channel & ch)
 
     @property
     def resolved_records_per_buffer(self) -> int:
@@ -138,6 +143,7 @@ class CaptureSession:
     active: bool = True
     started: bool = False
     released: bool = False
+    channel_count: int = 1
 
 
 def open_ats9371(
@@ -224,7 +230,11 @@ def configure_ats9371(
     channel: int = CHANNEL_A,
 ) -> None:
     configure_clock(api, board.handle, use_external_10mhz_reference)
-    configure_channel(api, board.handle, channel)
+    if channel not in (CHANNEL_A, CHANNEL_B, CHANNEL_A | CHANNEL_B):
+        raise ValueError("invalid ADC channel mask")
+    for selected in (CHANNEL_A, CHANNEL_B):
+        if channel & selected:
+            configure_channel(api, board.handle, selected)
     configure_external_trigger(api, board.handle, trigger)
 
 
@@ -269,6 +279,8 @@ def release_dma_memory(address: int) -> None:
 def arm_capture(
     api: ATSApi, board: BoardInfo, config: CaptureConfig
 ) -> CaptureSession:
+    if bytes_per_sample(board.bits_per_sample) != 2:
+        raise ValueError("capture requires 16-bit ADC transfer containers")
     records_per_buffer = config.resolved_records_per_buffer
     buffers_per_acquisition = (
         config.records_per_acquisition // records_per_buffer
@@ -276,8 +288,10 @@ def arm_capture(
     allocated_buffer_count = min(
         config.dma_buffer_count, buffers_per_acquisition
     )
-    sample_count = config.samples_per_record * records_per_buffer
+    sample_count = config.samples_per_record * records_per_buffer * len(config.channels)
     size_bytes = sample_count * bytes_per_sample(board.bits_per_sample)
+    if size_bytes > 0xFFFFFFFF:
+        raise ValueError("DMA buffer exceeds the SDK U32 byte-count limit")
     buffers: list[DmaBuffer] = []
 
     try:
@@ -293,7 +307,8 @@ def arm_capture(
             config.samples_per_record,
             records_per_buffer,
             config.records_per_acquisition,
-            ADMA_NPT | ADMA_EXTERNAL_STARTCAPTURE,
+            # Explicit sample interleave: R0[A0 B0 A1 B1 ...], R1[...].
+            ADMA_NPT | ADMA_EXTERNAL_STARTCAPTURE | (ADMA_INTERLEAVE_SAMPLES if len(config.channels) == 2 else 0),
         )
         for buffer in buffers:
             api.post_async_buffer(
@@ -314,16 +329,19 @@ def arm_capture(
         records_per_acquisition=config.records_per_acquisition,
         buffers_per_acquisition=buffers_per_acquisition,
         bits_per_sample=board.bits_per_sample,
+        channel_count=len(config.channels),
     )
 
 
 def start_capture(api: ATSApi, session: CaptureSession) -> None:
+    if session.released or not session.active or session.started:
+        raise RuntimeError("capture session must be active, unreleased and not started")
     api.start_capture(session.handle)
     session.started = True
 
 
 def copy_dma_buffer(
-    session: CaptureSession, buffer: DmaBuffer
+    session: CaptureSession, buffer: DmaBuffer, *, out=None
 ) -> npt.NDArray[np.uint16]:
     if bytes_per_sample(session.bits_per_sample) != 2:
         raise RuntimeError(
@@ -332,9 +350,18 @@ def copy_dma_buffer(
         )
     array_type = ctypes.c_uint16 * buffer.sample_count
     view = np.ctypeslib.as_array(array_type.from_address(buffer.address))
-    return view.copy().reshape(
-        session.records_per_buffer, session.samples_per_record
-    )
+    if session.channel_count == 2:
+        shaped = view.reshape(
+            session.records_per_buffer, session.samples_per_record, 2
+        ).transpose(0, 2, 1)
+    else:
+        shaped = view.reshape(session.records_per_buffer, session.samples_per_record)
+    if out is None:
+        return shaped.copy()
+    if out.shape != shaped.shape or out.dtype != np.uint16:
+        raise ValueError("DMA destination shape/dtype mismatch")
+    np.copyto(out, shaped)
+    return out
 
 
 def wait_for_capture(
@@ -344,7 +371,9 @@ def wait_for_capture(
         raise RuntimeError("Call start_capture before wait_for_capture")
 
     records = np.empty(
-        (session.records_per_acquisition, session.samples_per_record),
+        ((session.records_per_acquisition, 2, session.samples_per_record)
+         if session.channel_count == 2 else
+         (session.records_per_acquisition, session.samples_per_record)),
         dtype=np.uint16,
     )
     buffer_count = len(session.buffers)
@@ -355,7 +384,8 @@ def wait_for_capture(
 
         record_start = completed * session.records_per_buffer
         record_stop = record_start + session.records_per_buffer
-        records[record_start:record_stop] = copy_dma_buffer(session, buffer)
+        # Copy directly into final owned storage before reposting the DMA buffer.
+        copy_dma_buffer(session, buffer, out=records[record_start:record_stop])
 
         if completed + buffer_count < session.buffers_per_acquisition:
             api.post_async_buffer(
@@ -376,9 +406,20 @@ def free_capture(session: CaptureSession) -> None:
     if session.active:
         raise RuntimeError("Call abort_capture before free_capture")
     if not session.released:
+        failed = []
+        first_error = None
         for buffer in session.buffers:
-            release_dma_memory(buffer.address)
-        session.released = True
+            try:
+                release_dma_memory(buffer.address)
+            except Exception as error:
+                failed.append(buffer)
+                if first_error is None:
+                    first_error = error
+        # Retry only unreleased allocations if an OS free failed.
+        session.buffers[:] = failed
+        session.released = not failed
+        if first_error is not None:
+            raise first_error
 
 
 def unpack_adc_codes(

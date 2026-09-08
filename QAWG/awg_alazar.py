@@ -608,6 +608,7 @@ class AWGAlazar:
                 raw_codes=capture.raw_codes,
                 records_volts=records,
                 sample_rate_hz=capture.sample_rate_hz,
+                channels=capture.channels,
             )
 
         self.last_capture = capture
@@ -620,6 +621,51 @@ class AWGAlazar:
         if not 0 <= start < stop <= number_of_samples:
             raise ValueError("integration window is outside the acquired record")
         return slice(start, stop)
+
+    def acquire_referenced_waveforms(
+        self, n_shots: int, *, processor, reference_window_samples: tuple[int, int],
+        min_reference_amplitude: float, expected_reference_phase=0.0,
+    ):
+        """Capture simultaneous A(signal)/B(pilot); return capture, full IQ, phases.
+
+        No time/shot averaging or per-record baseline subtraction. The uploaded
+        AWG program and external trigger settings must already be configured.
+        This does not reorder compiled sweep steps: callers must preserve labels.
+        """
+        from dataclasses import replace
+        from .alazar import configure_channel, reference_phase_correct
+        if processor.sample_rate_hz != self.alazar_sample_rate_hz:
+            raise ValueError("processor sample rate must match the ADC")
+        config = replace(self._acquisition_config(n_shots), channel=CHANNEL_A | CHANNEL_B)
+        start, stop = reference_window_samples
+        edge = processor.edge_samples
+        if not edge <= start < stop <= config.samples_per_record-edge:
+            raise ValueError("pilot window must be outside the FIR boundary guards")
+        if not np.isfinite(min_reference_amplitude) or min_reference_amplitude <= 0:
+            raise ValueError("provide a positive pilot amplitude threshold")
+        for channel in (CHANNEL_A, CHANNEL_B):
+            configure_channel(self.alazar.api, self.alazar.board.handle, channel)
+        if self._uploaded_sequence_name is None:
+            self.awg.stop()
+        else:
+            self.awg.rewind_sequence(self._uploaded_sequence_name)
+        try:
+            capture = self.alazar.capture(config,
+                start_callback=lambda: self.awg.run(wait_until_ready=False))
+        finally:
+            with suppress(Exception):
+                self.awg.stop()
+        self.last_capture = capture
+        self.last_raw_codes = capture.raw_codes
+        self.last_records_volts = capture.records_volts
+        iq_a = processor.process(capture.channel_records(CHANNEL_A))
+        iq_b = processor.process(capture.channel_records(CHANNEL_B))
+        corrected, phases = reference_phase_correct(iq_a, iq_b, reference_window_samples,
+            min_reference_amplitude=min_reference_amplitude,
+            expected_reference_phase=expected_reference_phase)
+        self.last_downconverted_iq = corrected
+        self.last_time_s = capture.time_s
+        return capture, corrected, phases
 
     def _lowpass_downconverted_iq(
         self,

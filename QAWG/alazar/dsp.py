@@ -8,6 +8,15 @@ import numpy as np
 import numpy.typing as npt
 
 
+@functools.lru_cache(maxsize=16)
+def _mixing_reference(samples, sample_rate_hz, frequency_hz, phase):
+    reference = 2.0 * np.exp(-1j * (
+        2.0 * np.pi * frequency_hz * np.arange(samples) / sample_rate_hz + phase
+    ))
+    reference.flags.writeable = False
+    return reference
+
+
 def _records(values: npt.ArrayLike) -> npt.NDArray[np.float64]:
     records = np.asarray(values, dtype=np.float64)
     if records.ndim != 2 or records.shape[1] == 0:
@@ -22,14 +31,15 @@ def downconvert(
     reference_phase_radians: float = 0.0,
 ) -> npt.NDArray[np.complex128]:
     """Mix real voltage records to complex baseband."""
-    if sample_rate_hz <= 0:
-        raise ValueError("sample_rate_hz must be positive")
+    if not np.all(np.isfinite([sample_rate_hz, frequency_hz, reference_phase_radians])) or sample_rate_hz <= 0:
+        raise ValueError("DDC parameters must be finite and sample_rate_hz positive")
     records = _records(records_volts)
-    time = np.arange(records.shape[1]) / sample_rate_hz
-    reference = np.exp(
-        -1j * (2.0 * np.pi * frequency_hz * time + reference_phase_radians)
-    )
-    return 2.0 * records * reference
+    # Bound retained cache memory for long acquisitions; no shot-sized real temporary.
+    make_reference = (_mixing_reference if records.shape[1] <= 65536
+                      else _mixing_reference.__wrapped__)
+    reference = make_reference(records.shape[1], float(sample_rate_hz),
+                               float(frequency_hz), float(reference_phase_radians))
+    return records * reference
 
 
 def integrate(
@@ -57,7 +67,9 @@ def integrate(
     normalization = float(np.sum(np.abs(weights)))
     if normalization == 0:
         raise ValueError("integration_weights cannot all be zero")
-    return np.sum(values[..., start:stop] * weights, axis=-1) / normalization
+    # einsum avoids an intermediate array the size of the entire integration window.
+    return np.einsum('...n,n->...', values[..., start:stop], weights,
+                     optimize=False) / normalization
 
 
 @functools.lru_cache(maxsize=32)
@@ -103,8 +115,14 @@ def design_lowpass_fir(
 def fir_lowpass_iq(
     baseband_iq: npt.ArrayLike,
     coefficients: npt.ArrayLike,
+    *,
+    batch_records: int = 128,
 ) -> npt.NDArray[np.complex128]:
-    """Apply a centered linear-phase FIR along the final sample axis."""
+    """Centered FIR with bounded FFT batches; output owns only its exact shape.
+
+    batch_records bounds simultaneous records in FFT scratch arrays. The full
+    input/output still reside in RAM; this is not acquisition streaming.
+    """
     values = np.asarray(baseband_iq, dtype=np.complex128)
     taps = np.asarray(coefficients, dtype=np.float64)
     if values.ndim < 2 or values.shape[-1] == 0:
@@ -113,15 +131,29 @@ def fir_lowpass_iq(
         raise ValueError("coefficients must be a non-empty odd-length vector")
     if not np.all(np.isfinite(taps)):
         raise ValueError("coefficients must be finite")
+    if isinstance(batch_records, bool) or int(batch_records) != batch_records or batch_records < 1:
+        raise ValueError("batch_records must be a positive integer")
     full_count = values.shape[-1] + taps.size - 1
     fft_count = 1 << (full_count - 1).bit_length()
-    full = np.fft.ifft(
-        np.fft.fft(values, n=fft_count, axis=-1)
-        * np.fft.fft(taps, n=fft_count),
-        axis=-1,
-    )[..., :full_count]
+    kernel = np.fft.fft(taps, n=fft_count)
+    output = np.empty(values.shape, dtype=np.complex128)
+    rows = int(np.prod(values.shape[:-1]))
+    dest = output.reshape(rows, values.shape[-1])
+    # Avoid copying an entire strided input just to flatten its leading axes.
+    source = values.reshape(rows, values.shape[-1]) if values.flags.c_contiguous else None
     delay = (taps.size - 1) // 2
-    return full[..., delay : delay + values.shape[-1]]
+    for start in range(0, rows, int(batch_records)):
+        stop = min(start + int(batch_records), rows)
+        if source is not None:
+            block = source[start:stop]
+        else:
+            indices = np.unravel_index(np.arange(start, stop), values.shape[:-1])
+            block = values[indices]
+        spectrum = np.fft.fft(block, n=fft_count, axis=-1)
+        spectrum *= kernel
+        filtered = np.fft.ifft(spectrum, axis=-1)
+        dest[start:stop] = filtered[:, delay:delay + values.shape[-1]]
+    return output
 
 
 def fir_filter(

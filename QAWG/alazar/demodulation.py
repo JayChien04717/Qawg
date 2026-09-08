@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
+from .dsp import downconvert
+
 
 def require_records(
     records: npt.NDArray[np.float64],
@@ -24,11 +26,8 @@ def digital_downconvert(
     reference_phase_radians: float = 0.0,
 ) -> npt.NDArray[np.complex128]:
     """Mix real IF records to complex baseband without low-pass filtering."""
-    records = require_records(records_volts)
-    time = np.arange(records.shape[1], dtype=np.float64) / sample_rate_hz
-    phase = 2.0 * np.pi * intermediate_frequency_hz * time
-    reference = np.exp(-1j * (phase + reference_phase_radians))
-    return 2.0 * records * reference
+    return downconvert(records_volts, sample_rate_hz,
+                       intermediate_frequency_hz, reference_phase_radians)
 
 
 def _integrate_iq_window(

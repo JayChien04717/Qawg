@@ -1,0 +1,33 @@
+{
+  "python": "3.8.20",
+  "numpy": "1.24.4",
+  "shape": [
+    1024,
+    2048
+  ],
+  "notes": "5-run medians after warmup; tracemalloc excludes pre-existing input and may not capture all native allocations; not ADC throughput",
+  "old_ddc": {
+    "median_seconds": 0.011723299999999992,
+    "traced_peak_MiB": 48.29826354980469,
+    "traced_retained_MiB": 32.00029754638672,
+    "output_backing_MiB": 32.0
+  },
+  "new_ddc": {
+    "median_seconds": 0.007761000000000018,
+    "traced_peak_MiB": 32.251731872558594,
+    "traced_retained_MiB": 32.00091552734375,
+    "output_backing_MiB": 32.0
+  },
+  "old_fir": {
+    "median_seconds": 0.13321839999999985,
+    "traced_peak_MiB": 128.18964767456055,
+    "traced_retained_MiB": 64.00118255615234,
+    "output_backing_MiB": 64.0
+  },
+  "new_fir": {
+    "median_seconds": 0.13257709999999978,
+    "traced_peak_MiB": 64.06528091430664,
+    "traced_retained_MiB": 32.001747131347656,
+    "output_backing_MiB": 32.0
+  }
+}

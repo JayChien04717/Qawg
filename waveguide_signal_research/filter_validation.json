@@ -1,0 +1,22 @@
+{
+  "Previous: cutoff 20 MHz, 101 taps": {
+    "max_abs_passband_error_db_0_30MHz": 17.41811325854731,
+    "max_stopband_db_70MHz_to_Nyquist": -88.06755890872692,
+    "edge_samples_each_side": 50,
+    "synthetic_AM_recovered_amplitude_ratio": {
+      "5000000.0": 0.9721573327871345,
+      "20000000.0": 0.5078753845119965,
+      "30000000.0": 0.13458439658450186
+    }
+  },
+  "Example: pass 0-30 MHz, cutoff 50 MHz, 181 taps": {
+    "max_abs_passband_error_db_0_30MHz": 0.0004456562778620569,
+    "max_stopband_db_70MHz_to_Nyquist": -83.3435250311409,
+    "edge_samples_each_side": 90,
+    "synthetic_AM_recovered_amplitude_ratio": {
+      "5000000.0": 0.9999615513003386,
+      "20000000.0": 1.0000017402115562,
+      "30000000.0": 0.9999717918093528
+    }
+  }
+}

@@ -19,6 +19,7 @@ from .ats9371 import (
 )
 from .ats_api import ATSApi, AlazarError
 from .device import Alazar9371, ArmedCapture, CaptureData
+from .waveguide import IFProcessor, reference_phase_correct, save_mode_shots
 from .dsp import (
     correct_interleaving_offsets,
     design_lowpass_fir,
@@ -32,6 +33,9 @@ from .dsp import (
 )
 
 __all__ = [
+    "IFProcessor",
+    "reference_phase_correct",
+    "save_mode_shots",
     "ATSApi",
     "AlazarError",
     "Alazar9371",

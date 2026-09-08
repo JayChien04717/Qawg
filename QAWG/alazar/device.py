@@ -31,6 +31,15 @@ class CaptureData:
     raw_codes: npt.NDArray[np.uint16]
     records_volts: npt.NDArray[np.float64]
     sample_rate_hz: float
+    channels: tuple[int, ...] = (1,)
+
+    def channel_records(self, channel: int) -> npt.NDArray[np.float64]:
+        """Return (shots, samples); dual capture axes are (shots, A/B, samples)."""
+        if channel not in self.channels:
+            raise ValueError("requested channel was not acquired")
+        if self.records_volts.ndim == 2:
+            return self.records_volts
+        return self.records_volts[:, self.channels.index(channel), :]
 
     @property
     def time_s(self) -> npt.NDArray[np.float64]:
@@ -84,6 +93,7 @@ class ArmedCapture:
             raw_codes=raw_codes,
             records_volts=records_volts,
             sample_rate_hz=self.config.sample_rate_hz,
+            channels=self.config.channels,
         )
 
     def close(self) -> None:
