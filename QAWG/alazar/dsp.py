@@ -143,29 +143,6 @@ def fir_filter(
     )
 
 
-def weighted_full_demodulate(
-    records_volts: npt.ArrayLike,
-    sample_rate_hz: float,
-    intermediate_frequency_hz: float,
-    start_sample: int = 0,
-    stop_sample: int | None = None,
-    integration_weights: npt.ArrayLike | None = None,
-    reference_phase_radians: float = 0.0,
-) -> npt.NDArray[np.complex128]:
-    """Compatibility helper combining downconversion and integration."""
-    return integrate(
-        downconvert(
-            records_volts,
-            sample_rate_hz,
-            intermediate_frequency_hz,
-            reference_phase_radians,
-        ),
-        start_sample,
-        stop_sample,
-        integration_weights,
-    )
-
-
 def correct_interleaving_offsets(
     records_volts: npt.ArrayLike,
     stop_sample: int,
@@ -188,19 +165,102 @@ def correct_interleaving_offsets(
     return corrected
 
 
-# Compatibility names for existing callers.
-digital_downconvert = downconvert
-weighted_integrate_iq = integrate
+def moving_average_iq(
+    baseband_iq: npt.ArrayLike,
+    window_samples: int,
+) -> npt.NDArray[np.complex128]:
+    """Boxcar-average complex traces; only fully covered windows are kept.
+
+    Output length is ``samples - window_samples + 1``; use
+    :func:`moving_average_time_axis` for the matching window-center times.
+    """
+    values = np.asarray(baseband_iq, dtype=np.complex128)
+    if values.ndim != 2:
+        raise ValueError("baseband_iq must have shape (records, samples)")
+    if not 1 <= window_samples <= values.shape[1]:
+        raise ValueError("window_samples must fit inside each record")
+    cumulative = np.cumsum(
+        np.pad(values, ((0, 0), (1, 0))), axis=1
+    )
+    return (
+        cumulative[:, window_samples:] - cumulative[:, :-window_samples]
+    ) / window_samples
+
+
+def moving_average_time_axis(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    window_samples: int,
+) -> npt.NDArray[np.float64]:
+    """Return center times of the :func:`moving_average_iq` outputs."""
+    if not 1 <= window_samples <= number_of_samples:
+        raise ValueError("window_samples must fit inside the acquired record")
+    count = number_of_samples - window_samples + 1
+    first_center = (window_samples - 1) / (2.0 * sample_rate_hz)
+    return first_center + np.arange(count) / sample_rate_hz
+
+
+def phase_align_iq(
+    baseband_iq: npt.ArrayLike,
+    start_sample: int,
+    stop_sample: int,
+) -> tuple[npt.NDArray[np.complex128], npt.NDArray[np.float64]]:
+    """Rotate each record so its reference-window phase is zero.
+
+    Only use this when the source has no phase reference to the digitizer;
+    with a shared clock it biases noisy shots (see
+    :func:`clock_referenced_envelope`).
+    """
+    values = np.asarray(baseband_iq, dtype=np.complex128)
+    if values.ndim != 2:
+        raise ValueError("baseband_iq must have shape (records, samples)")
+    if not 0 <= start_sample < stop_sample <= values.shape[1]:
+        raise ValueError("phase reference window is outside the record")
+    reference = np.mean(values[:, start_sample:stop_sample], axis=1)
+    if np.any(np.abs(reference) == 0):
+        raise ValueError("phase reference window contains a zero-amplitude shot")
+    phases = np.angle(reference)
+    return values * np.exp(-1j * phases[:, None]), phases
+
+
+def clock_referenced_envelope(
+    records_volts: npt.ArrayLike,
+    sample_rate_hz: float,
+    frequency_hz: float,
+    window_samples: int,
+    baseline_stop_sample: int | None = None,
+) -> tuple[
+    npt.NDArray[np.complex128],
+    npt.NDArray[np.complex128],
+    npt.NDArray[np.float64],
+]:
+    """Envelope for AWG and digitizer sharing a reference clock.
+
+    Returns ``(per_record, coherent_average, rms_envelope)``. Phase is never
+    estimated from the signal, so there is no rectification bias.
+    """
+    records = _records(records_volts)
+    if baseline_stop_sample is not None:
+        records = correct_interleaving_offsets(records, baseline_stop_sample)
+    filtered = moving_average_iq(
+        downconvert(records, sample_rate_hz, frequency_hz), window_samples
+    )
+    return (
+        filtered,
+        np.mean(filtered, axis=0),
+        np.sqrt(np.mean(np.abs(filtered) ** 2, axis=0)),
+    )
 
 
 __all__ = [
+    "clock_referenced_envelope",
     "correct_interleaving_offsets",
     "design_lowpass_fir",
-    "digital_downconvert",
     "downconvert",
     "fir_filter",
     "fir_lowpass_iq",
     "integrate",
-    "weighted_full_demodulate",
-    "weighted_integrate_iq",
+    "moving_average_iq",
+    "moving_average_time_axis",
+    "phase_align_iq",
 ]

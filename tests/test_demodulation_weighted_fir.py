@@ -2,10 +2,9 @@ import numpy as np
 
 from QAWG.alazar import (
     design_lowpass_fir,
-    digital_downconvert,
+    downconvert,
+    integrate,
     fir_lowpass_iq,
-    weighted_full_demodulate,
-    weighted_integrate_iq,
 )
 
 
@@ -18,18 +17,14 @@ def test_weighted_full_demodulation_recovers_tone_amplitude_and_phase():
     time = np.arange(sample_count) / sample_rate
     records = amplitude * np.cos(2 * np.pi * frequency * time + phase)
 
-    result = weighted_full_demodulate(
-        records[None, :],
-        sample_rate,
-        frequency,
-    )
+    result = integrate(downconvert(records[None, :], sample_rate, frequency))
 
     np.testing.assert_allclose(result[0], amplitude * np.exp(1j * phase), atol=1e-14)
 
 
 def test_weighted_integration_selects_requested_samples():
     baseband = np.asarray([[1 + 2j, 3 + 4j, 8 + 1j, 9 + 2j]])
-    result = weighted_integrate_iq(
+    result = integrate(
         baseband,
         1,
         4,
@@ -56,7 +51,7 @@ def test_fir_has_unity_dc_gain_and_suppresses_100mhz_image():
 
 def test_fir_downconversion_keeps_record_shape():
     records = np.ones((3, 257))
-    baseband = digital_downconvert(records, 1e9, 50e6)
+    baseband = downconvert(records, 1e9, 50e6)
     taps = design_lowpass_fir(1e9, 30e6)
     filtered = fir_lowpass_iq(baseband, taps)
     assert filtered.shape == records.shape

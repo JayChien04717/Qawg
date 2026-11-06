@@ -152,7 +152,10 @@ def _render_channels(
     total_duration_s: float,
     minimum_samples: int,
     modulate: bool,
+    phase_reference: str = "global",
 ) -> dict[int, FloatArray]:
+    if phase_reference not in {"global", "pulse"}:
+        raise ValueError("phase_reference must be 'global' or 'pulse'")
     if total_duration_s <= 0:
         raise ValueError("total_duration_s must be positive")
     if isinstance(timeline, (Waveform, Parallel)):
@@ -179,6 +182,7 @@ def _render_channels(
                 sample_rate_hz,
                 pulse.fc,
                 pulse.phase_radians,
+                start / sample_rate_hz if phase_reference == "global" else 0.0,
             )
             if modulate
             else pulse.envelope
@@ -192,14 +196,21 @@ def align_channels(
     sample_rate_hz: float,
     total_duration_s: float = 5e-6,
     minimum_samples: int = MIN_WAVEFORM_SAMPLES,
+    phase_reference: str = "global",
 ) -> dict[int, FloatArray]:
-    """Render modulated channels onto one sample-aligned time axis."""
+    """Render modulated channels onto one sample-aligned time axis.
+
+    ``phase_reference="global"`` keeps each carrier phase-continuous across
+    pulses (phase measured from sample 0); ``"pulse"`` restarts the carrier
+    at every pulse start.
+    """
     return _render_channels(
         timeline,
         sample_rate_hz,
         total_duration_s,
         minimum_samples,
         modulate=True,
+        phase_reference=phase_reference,
     )
 
 

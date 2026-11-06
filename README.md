@@ -147,6 +147,12 @@ carrier modulation：
 waveform(t) = gain * envelope(t) * sin(2*pi*frequency*t + phase)
 ```
 
+這裡的 `t` 是 sequence step 的全域時間（step 第 0 個 sample 為 0，也就是
+marker 與 ADC record 的起點），所以不同時間的 pulse 與 demodulation 共用
+同一個連續載波。Ramsey 的條紋因此只來自 qubit 與 drive 的 detuning，
+readout 的 IQ 相位也不會隨 readout 位置改變。需要舊行為（載波在每個
+pulse 起點重置）時使用 `ExperimentProgram(cfg, phase_reference="pulse")`。
+
 ### 3. Compile 與 acquisition
 
 不連接硬體也可以 compile 與預覽 waveform：
@@ -208,33 +214,6 @@ s21 = result.s21("ro")
 - `delay_auto` sweep
 - Phase single-shot acquisition
 - Raw record、IQ trajectory 與結果視覺化
-
-重新產生乾淨的 demo notebook：
-
-```powershell
-python QAWG\build_demo_notebook.py
-```
-
-這個命令只建立 notebook，不會連接或操作硬體。實際執行 notebook cells
-才會連接 AWG5208 與 ATS9371。
-
-[multiplex.ipynb](multiplex.ipynb) 示範在同一 AWG channel 疊加兩個 readout
-tones，透過 trace acquisition 保留共同的 ATS9371 acquire-window records，
-再分別 demodulate 每個 frequency。Multiplex averaging 使用：
-
-```python
-trace_time_s, raw_window, downconverted_window = experiment.acquire_decimate(
-    n_average=1000,
-)
-records = experiment.last_records_volts
-```
-
-`n_average` 屬於 acquisition，不是 `AWGAlazar.connect()` 的參數。重新產生
-multiplex notebook：
-
-```powershell
-python QAWG\build_multiplex_notebook.py
-```
 
 ## 測試
 

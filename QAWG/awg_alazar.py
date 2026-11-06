@@ -486,28 +486,12 @@ class AWGAlazar:
             remove_dc_offset=compiled.remove_dc_offset,
         )
         records = capture.records_volts
-        baseband = downconvert(
-            records,
-            self.alazar_sample_rate_hz,
-            self.tone_frequency_hz,
-            self.reference_phase_radians,
-        )
-        downconverted = self._lowpass_downconverted_iq(baseband)
+        downconverted, weighted_shots, _ = self._demodulate(records)
         raw_time_s = (
             np.arange(records.shape[1], dtype=np.float64)
             / self.alazar_sample_rate_hz
         )
-        iq_time_s = (
-            np.arange(downconverted.shape[1], dtype=np.float64)
-            / self.alazar_sample_rate_hz
-        )
-        integration_window = self._integration_slice(downconverted.shape[1])
-        weighted_shots = integrate(
-            baseband,
-            integration_window.start,
-            integration_window.stop,
-            self.integration_weights,
-        )
+        iq_time_s = raw_time_s[: downconverted.shape[1]]
         raw_by_point = records.reshape(
             averages,
             steps,
@@ -518,8 +502,6 @@ class AWGAlazar:
             steps,
             downconverted.shape[1],
         )
-        self.last_downconverted_iq = downconverted
-        self.last_shot_iq = weighted_shots
         self.last_time_s = iq_time_s
 
         marker_windows_s = None
@@ -615,6 +597,38 @@ class AWGAlazar:
         self.last_records_volts = records
         return capture
 
+    def _demodulate(
+        self,
+        records: npt.NDArray[np.float64],
+    ) -> tuple[
+        npt.NDArray[np.complex128],
+        npt.NDArray[np.complex128],
+        slice,
+    ]:
+        """Downconvert once; return FIR traces, integrated shots, window.
+
+        Integration uses the unfiltered baseband so the FIR does not smear
+        the window edges. Also records ``last_downconverted_iq`` and
+        ``last_shot_iq``.
+        """
+        baseband = downconvert(
+            records,
+            self.alazar_sample_rate_hz,
+            self.tone_frequency_hz,
+            self.reference_phase_radians,
+        )
+        filtered = self._lowpass_downconverted_iq(baseband)
+        window = self._integration_slice(filtered.shape[1])
+        shots = integrate(
+            baseband,
+            window.start,
+            window.stop,
+            self.integration_weights,
+        )
+        self.last_downconverted_iq = filtered
+        self.last_shot_iq = shots
+        return filtered, shots, window
+
     def _integration_slice(self, number_of_samples: int) -> slice:
         start, stop = self.integrate_window_cycles
         if not 0 <= start < stop <= number_of_samples:
@@ -652,21 +666,7 @@ class AWGAlazar:
                 else bool(remove_dc_offset)
             ),
         )
-        baseband = downconvert(
-            capture.records_volts,
-            capture.sample_rate_hz,
-            self.tone_frequency_hz,
-            self.reference_phase_radians,
-        )
-        filtered = self._lowpass_downconverted_iq(baseband)
-        window = self._integration_slice(filtered.shape[1])
-        self.last_downconverted_iq = filtered
-        self.last_shot_iq = integrate(
-            baseband,
-            window.start,
-            window.stop,
-            self.integration_weights,
-        )
+        filtered, _, window = self._demodulate(capture.records_volts)
         self.last_time_s = capture.time_s
         return (
             capture.time_s[window],

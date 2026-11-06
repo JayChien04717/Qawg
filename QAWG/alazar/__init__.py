@@ -20,15 +20,16 @@ from .ats9371 import (
 from .ats_api import ATSApi, AlazarError
 from .device import Alazar9371, ArmedCapture, CaptureData
 from .dsp import (
+    clock_referenced_envelope,
     correct_interleaving_offsets,
     design_lowpass_fir,
-    digital_downconvert,
     downconvert,
     fir_filter,
     fir_lowpass_iq,
     integrate,
-    weighted_full_demodulate,
-    weighted_integrate_iq,
+    moving_average_iq,
+    moving_average_time_axis,
+    phase_align_iq,
 )
 
 __all__ = [
@@ -49,16 +50,17 @@ __all__ = [
     "arm_capture",
     "configure_ats9371",
     "configure_channel",
-    "digital_downconvert",
     "downconvert",
     "fir_filter",
     "integrate",
+    "clock_referenced_envelope",
+    "moving_average_iq",
+    "moving_average_time_axis",
+    "phase_align_iq",
     "fir_lowpass_iq",
     "free_capture",
     "get_board_info",
     "open_ats9371",
     "start_capture",
-    "weighted_full_demodulate",
-    "weighted_integrate_iq",
     "wait_for_capture",
 ]

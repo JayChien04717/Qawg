@@ -2,7 +2,7 @@
 
 `QAWG.alazar` 是不依賴 QCoDeS 的 ATS9371 acquisition 與 data processing
 package。它直接呼叫官方 `ATSApi.dll`，負責 DMA acquisition、ADC code
-conversion、digital downconversion、filter、integration 與 multiplex DSP。
+conversion、digital downconversion、filter、integration 與 DSP。
 
 這一層不建立 AWG waveform 或 sequence。AWG 與 Alazar 的執行順序由
 `QAWG.awg_alazar.AWGAlazar` 協調。
@@ -100,7 +100,7 @@ experiment = AWGAlazar.connect(
 ```
 
 底層 pure NumPy helpers 為 `design_lowpass_fir()`、`fir_lowpass_iq()`、
-`weighted_integrate_iq()` 與 `weighted_full_demodulate()`。
+`integrate()`、`downconvert()`。
 
 兩者都會保留 full acquire-window debug data：
 

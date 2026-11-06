@@ -327,7 +327,11 @@ class ExperimentProgram:
         name: str | None = None,
         final_delay_s: float = 1 * us,
         remove_dc_offset: bool | None = None,
+        phase_reference: str = "global",
     ) -> None:
+        if phase_reference not in {"global", "pulse"}:
+            raise ValueError("phase_reference must be 'global' or 'pulse'")
+        self.phase_reference = phase_reference
         self.cfg = cfg
         self.name = name or self.__class__.__name__
         self.final_delay_s = float(final_delay_s)
@@ -594,12 +598,17 @@ class ExperimentProgram:
         for point_index, scheduled_point in enumerate(scheduled):
             for pulse in scheduled_point.pulses:
                 generator = self.generators[pulse.definition.generator]
+                start = int(round(pulse.start_s * sample_rate_hz))
                 values = self._render_pulse(
                     pulse,
                     sample_rate_hz,
                     generator.amplitude_vpp,
+                    start_time_s=(
+                        start / sample_rate_hz
+                        if self.phase_reference == "global"
+                        else 0.0
+                    ),
                 )
-                start = int(round(pulse.start_s * sample_rate_hz))
                 stop = start + values.size
                 channel_waveforms[generator.channel][
                     point_index, start:stop
@@ -843,6 +852,7 @@ class ExperimentProgram:
         pulse: ScheduledPulse,
         sample_rate_hz: float,
         amplitude_vpp: float,
+        start_time_s: float = 0.0,
     ) -> npt.NDArray[np.float64]:
         if amplitude_vpp <= 0:
             raise ValueError("amplitude_vpp must be positive")
@@ -922,5 +932,6 @@ class ExperimentProgram:
             sample_rate_hz,
             pulse.frequency_hz,
             pulse.phase_radians,
+            start_time_s,
         )
         return waveform * (amplitude_vpp / 2.0)

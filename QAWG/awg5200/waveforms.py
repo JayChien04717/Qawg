@@ -69,8 +69,15 @@ def modulate_envelope(
     sample_rate_hz: float,
     frequency_hz: float,
     phase_radians: float = 0.0,
+    start_time_s: float = 0.0,
 ) -> FloatArray:
-    """Apply a sine carrier to one real-valued waveform envelope."""
+    """Apply a sine carrier to one real-valued waveform envelope.
+
+    ``start_time_s`` is the envelope's start on the shared (step) time axis.
+    The carrier is ``sin(2*pi*f*(start_time_s + t) + phase)``, so pulses
+    placed at different times stay phase-coherent with one continuous
+    oscillator.  With the default 0 the carrier restarts at the pulse start.
+    """
     values = np.asarray(envelope, dtype=np.float64).reshape(-1)
     if values.size < 1:
         raise ValueError("envelope cannot be empty")
@@ -83,7 +90,7 @@ def modulate_envelope(
         sample_rate_hz,
         frequency_hz,
         amplitude_volts=1.0,
-        phase_radians=phase_radians,
+        phase_radians=phase_radians + 2.0 * np.pi * frequency_hz * start_time_s,
     )
     return values * carrier
 
