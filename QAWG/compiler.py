@@ -134,6 +134,7 @@ class ReadoutDeclaration:
     marker_low_volts: float = 0.0
     marker_high_volts: float = 1.2
     integrate_time_s: float | None = None
+    marker_at_readout: bool = False
 
 
 @dataclass(frozen=True)
@@ -213,6 +214,7 @@ class ExperimentResult:
     acquire_window_s: float | None = None
     remove_dc_offset: bool = False
     external_trigger_lsb_masked: bool = False
+    reference_deviation_rad: npt.NDArray[np.float64] | None = None
 
     def _check_readout(self, readout: str) -> None:
         if readout != self.readout_name:
@@ -377,7 +379,16 @@ class ExperimentProgram:
         marker_length: float = 40 * ns,
         marker_lead: float = 500 * ns,
         integrate_time: float | None = None,
+        marker_at_readout: bool = False,
     ) -> None:
+        """Declare the readout.
+
+        ``marker_at_readout=True`` puts the ATS trigger marker ``marker_lead``
+        before the tagged readout pulse instead of at the step start, so the
+        ADC record covers only the readout.  Use it when the readout sits
+        late in the step (T1, Ramsey, echo).  All steps must then place the
+        readout at the same time.
+        """
         if name != "ro":
             raise ValueError("The current compiler supports only readout 'ro'")
         if self.readouts:
@@ -409,6 +420,7 @@ class ExperimentProgram:
             integrate_time_s=(
                 None if integrate_time is None else float(integrate_time)
             ),
+            marker_at_readout=bool(marker_at_readout),
         )
 
     def add_sweep(
@@ -595,6 +607,32 @@ class ExperimentProgram:
         markers = np.zeros((len(points), step_samples), dtype=np.bool_)
         readout_windows_s = np.zeros((len(points), 2), dtype=np.float64)
 
+        marker_start = 0
+        if readout.marker_at_readout:
+            starts = {
+                int(round(
+                    min(
+                        pulse.start_s
+                        for pulse in point.pulses
+                        if pulse.definition.is_readout
+                    ) * sample_rate_hz
+                ))
+                for point in scheduled
+                if any(pulse.definition.is_readout for pulse in point.pulses)
+            }
+            if not starts or readout.waveform_channel is None:
+                raise ValueError(
+                    "marker_at_readout needs a tagged readout pulse "
+                    "(readout=True) and a readout waveform_ch"
+                )
+            if len(starts) != 1:
+                raise ValueError(
+                    "marker_at_readout needs the readout at the same time "
+                    "in every sequence step; anchor it with play(at=...)"
+                )
+            lead_samples = int(round(readout.marker_lead_s * sample_rate_hz))
+            marker_start = max(0, starts.pop() - lead_samples)
+
         for point_index, scheduled_point in enumerate(scheduled):
             for pulse in scheduled_point.pulses:
                 generator = self.generators[pulse.definition.generator]
@@ -619,7 +657,7 @@ class ExperimentProgram:
                 1,
                 int(round(readout.marker_length_s * sample_rate_hz)),
             )
-            active_marker[:marker_samples] = True
+            active_marker[marker_start : marker_start + marker_samples] = True
 
             if readout.waveform_channel is not None:
                 tagged_readout_pulses = [

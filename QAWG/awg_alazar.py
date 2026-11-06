@@ -16,14 +16,17 @@ from .alazar import (
     CaptureConfig,
     CaptureData,
     TriggerConfig,
+    apply_reference_correction,
     correct_interleaving_offsets,
     downconvert,
     fir_filter,
     integrate,
     open_ats9371,
+    reference_phase,
 )
 from .alazar.constants import (
     CHANNEL_A,
+    CHANNEL_AB,
     CHANNEL_B,
     MIN_SAMPLES_PER_RECORD,
     SAMPLES_PER_RECORD_ALIGNMENT,
@@ -117,6 +120,10 @@ class AWGAlazar:
         baseline_time_s: float | None = None,
         mask_external_trigger_lsb: bool = True,
         remove_dc_offset: bool = True,
+        reference_channel: str | int | None = None,
+        reference_frequency_hz: float | None = None,
+        reference_window_ns: tuple[float, float] | None = None,
+        reference_center_rad: float | None = None,
     ) -> None:
         self.awg = awg
         self.ats_api = ats_api
@@ -169,7 +176,30 @@ class AWGAlazar:
         self.baseline_time_s = baseline_time_s
         self.mask_external_trigger_lsb = bool(mask_external_trigger_lsb)
         self.remove_dc_offset = bool(remove_dc_offset)
+        # Optional second ADC channel carrying a reference tone.  Its phase in
+        # every record removes sub-sample trigger/clock jitter from the
+        # signal channel (see the waveguide-QED tutorial).
+        self.reference_channel = (
+            None
+            if reference_channel is None
+            else normalize_adc_channel(reference_channel)
+        )
+        self.reference_frequency_hz = (
+            None
+            if reference_frequency_hz is None
+            else float(reference_frequency_hz)
+        )
+        self.reference_window_ns = (
+            None
+            if reference_window_ns is None
+            else (float(reference_window_ns[0]), float(reference_window_ns[1]))
+        )
+        self.reference_center_rad = (
+            None if reference_center_rad is None else float(reference_center_rad)
+        )
 
+        self.last_reference_volts: npt.NDArray[np.float64] | None = None
+        self.last_reference_deviation_rad: npt.NDArray[np.float64] | None = None
         self.last_raw_codes: npt.NDArray[np.uint16] | None = None
         self.last_records_volts: npt.NDArray[np.float64] | None = None
         self.last_downconverted_iq: (
@@ -268,6 +298,17 @@ class AWGAlazar:
             raise ValueError("fir_number_of_taps must be odd and at least 3")
         if self.fir_kaiser_beta < 0:
             raise ValueError("fir_kaiser_beta cannot be negative")
+        if self.reference_channel is not None:
+            if self.reference_channel == self.adc_channel:
+                raise ValueError(
+                    "reference_channel must differ from adc_channel"
+                )
+            if self.reference_window_ns is not None:
+                start_ns, stop_ns = self.reference_window_ns
+                if not 0 <= start_ns < stop_ns <= self.acquire_window_ns:
+                    raise ValueError(
+                        "reference_window_ns must fit inside acquire_window_ns"
+                    )
         if self.baseline_time_s is not None:
             if not 0 < self.baseline_time_s * 1e9 <= self.acquire_window_ns:
                 raise ValueError(
@@ -282,6 +323,11 @@ class AWGAlazar:
     @property
     def adc_channel_name(self) -> str:
         return "CHA" if self.adc_channel == CHANNEL_A else "CHB"
+
+    @property
+    def _digitizer_channels(self) -> int:
+        """ATS channel mask: signal channel, plus reference when enabled."""
+        return self.adc_channel if self.reference_channel is None else CHANNEL_AB
 
     @property
     def adc_lsb_volts(self) -> float:
@@ -343,7 +389,7 @@ class AWGAlazar:
                 timeout_ticks=0,
             ),
             use_external_10mhz_reference=self.use_external_10mhz_reference,
-            channel=self.adc_channel,
+            channel=self._digitizer_channels,
         )
 
     def compile(self, program: "ExperimentProgram") -> "CompiledExperiment":
@@ -376,7 +422,7 @@ class AWGAlazar:
                 timeout_ticks=0,
             ),
             use_external_10mhz_reference=self.use_external_10mhz_reference,
-            channel=self.adc_channel,
+            channel=self._digitizer_channels,
         )
 
     @staticmethod
@@ -537,6 +583,11 @@ class AWGAlazar:
             acquire_window_s=self.acquire_window_ns * 1e-9,
             remove_dc_offset=compiled.remove_dc_offset,
             external_trigger_lsb_masked=self.mask_external_trigger_lsb,
+            reference_deviation_rad=(
+                None
+                if self.last_reference_deviation_rad is None
+                else self.last_reference_deviation_rad.reshape(averages, steps)
+            ),
         )
 
     def _acquisition_config(self, n_average: int) -> CaptureConfig:
@@ -549,7 +600,7 @@ class AWGAlazar:
             dma_buffer_count=self.dma_buffer_count,
             input_range_volts=self.input_range_volts,
             timeout_ms=self.timeout_ms,
-            channel=self.adc_channel,
+            channel=self._digitizer_channels,
             mask_external_trigger_lsb=self.mask_external_trigger_lsb,
         )
 
@@ -573,29 +624,83 @@ class AWGAlazar:
             with suppress(Exception):
                 self.awg.stop()
 
-        records = capture.records_volts
-        if self.baseline_time_s is not None:
-            records = correct_interleaving_offsets(
-                records,
-                stop_sample=self.ns2cycles(
-                    self.baseline_time_s * 1e9,
-                    inst="adc",
-                ),
-                period=2,
-            )
-        if remove_dc_offset:
-            records = remove_record_dc_offset(records)
-        if records is not capture.records_volts:
-            capture = CaptureData(
-                raw_codes=capture.raw_codes,
-                records_volts=records,
-                sample_rate_hz=capture.sample_rate_hz,
-            )
+        signal = capture.channel(self.adc_channel)
+        reference = (
+            None
+            if self.reference_channel is None
+            else capture.channel(self.reference_channel)
+        )
+
+        def clean(records: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            if self.baseline_time_s is not None:
+                records = correct_interleaving_offsets(
+                    records,
+                    stop_sample=self.ns2cycles(
+                        self.baseline_time_s * 1e9,
+                        inst="adc",
+                    ),
+                    period=2,
+                )
+            if remove_dc_offset:
+                records = remove_record_dc_offset(records)
+            return records
+
+        signal = clean(signal)
+        if reference is not None:
+            reference = clean(reference)
+        capture = CaptureData(
+            raw_codes=capture.raw_codes,
+            records_volts=signal,
+            sample_rate_hz=capture.sample_rate_hz,
+            reference_volts=reference,
+        )
 
         self.last_capture = capture
         self.last_raw_codes = capture.raw_codes
-        self.last_records_volts = records
+        self.last_records_volts = signal
+        self.last_reference_volts = reference
         return capture
+
+    def _baseband(
+        self,
+        capture_records: npt.NDArray[np.float64],
+    ) -> npt.NDArray[np.complex128]:
+        """Downconvert signal records, removing reference-channel jitter."""
+        baseband = downconvert(
+            capture_records,
+            self.alazar_sample_rate_hz,
+            self.tone_frequency_hz,
+            self.reference_phase_radians,
+        )
+        reference = self.last_reference_volts
+        if self.reference_channel is None or reference is None:
+            self.last_reference_deviation_rad = None
+            return baseband
+        f_ref = (
+            self.tone_frequency_hz
+            if self.reference_frequency_hz is None
+            else self.reference_frequency_hz
+        )
+        start_ns, stop_ns = (
+            self.integrate_window_ns
+            if self.reference_window_ns is None
+            else self.reference_window_ns
+        )
+        phase = reference_phase(
+            reference,
+            self.alazar_sample_rate_hz,
+            f_ref,
+            self.ns2cycles(start_ns, inst="adc"),
+            self.ns2cycles(stop_ns, inst="adc"),
+        )
+        corrected, deviation = apply_reference_correction(
+            baseband,
+            phase,
+            center_rad=self.reference_center_rad,
+            scale=self.tone_frequency_hz / f_ref,
+        )
+        self.last_reference_deviation_rad = deviation
+        return corrected
 
     def _demodulate(
         self,
@@ -611,12 +716,7 @@ class AWGAlazar:
         the window edges. Also records ``last_downconverted_iq`` and
         ``last_shot_iq``.
         """
-        baseband = downconvert(
-            records,
-            self.alazar_sample_rate_hz,
-            self.tone_frequency_hz,
-            self.reference_phase_radians,
-        )
+        baseband = self._baseband(records)
         filtered = self._lowpass_downconverted_iq(baseband)
         window = self._integration_slice(filtered.shape[1])
         shots = integrate(
@@ -693,12 +793,7 @@ class AWGAlazar:
             ),
         )
         window = self._integration_slice(capture.records_volts.shape[1])
-        baseband = downconvert(
-            capture.records_volts,
-            capture.sample_rate_hz,
-            self.tone_frequency_hz,
-            self.reference_phase_radians,
-        )
+        baseband = self._baseband(capture.records_volts)
         shots = integrate(
             baseband,
             window.start,

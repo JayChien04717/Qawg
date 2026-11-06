@@ -18,6 +18,7 @@ from .constants import (
     ATS9371_BOARD_KIND,
     BW_LIMIT_DISABLE,
     CHANNEL_A,
+    CHANNEL_AB,
     CHANNEL_B,
     CLOCK_EDGE_RISING,
     DC_COUPLING,
@@ -94,8 +95,10 @@ class CaptureConfig:
             raise ValueError("ATS9371 is currently configured for +/-400 mV")
         if self.timeout_ms < 1:
             raise ValueError("timeout_ms must be positive")
-        if self.channel not in (CHANNEL_A, CHANNEL_B):
-            raise ValueError("channel must be CHANNEL_A or CHANNEL_B")
+        if self.channel not in (CHANNEL_A, CHANNEL_B, CHANNEL_AB):
+            raise ValueError(
+                "channel must be CHANNEL_A, CHANNEL_B, or CHANNEL_AB"
+            )
         if self.records_per_buffer is not None:
             count = int(self.records_per_buffer)
             if count < 1 or self.records_per_acquisition % count:
@@ -103,6 +106,10 @@ class CaptureConfig:
                     "records_per_buffer must divide records_per_acquisition"
                 )
             object.__setattr__(self, "records_per_buffer", count)
+
+    @property
+    def channel_count(self) -> int:
+        return 2 if self.channel == CHANNEL_AB else 1
 
     @property
     def resolved_records_per_buffer(self) -> int:
@@ -138,6 +145,7 @@ class CaptureSession:
     active: bool = True
     started: bool = False
     released: bool = False
+    channel_count: int = 1
 
 
 def open_ats9371(
@@ -224,7 +232,11 @@ def configure_ats9371(
     channel: int = CHANNEL_A,
 ) -> None:
     configure_clock(api, board.handle, use_external_10mhz_reference)
-    configure_channel(api, board.handle, channel)
+    if channel == CHANNEL_AB:
+        configure_channel(api, board.handle, CHANNEL_A)
+        configure_channel(api, board.handle, CHANNEL_B)
+    else:
+        configure_channel(api, board.handle, channel)
     configure_external_trigger(api, board.handle, trigger)
 
 
@@ -276,7 +288,11 @@ def arm_capture(
     allocated_buffer_count = min(
         config.dma_buffer_count, buffers_per_acquisition
     )
-    sample_count = config.samples_per_record * records_per_buffer
+    sample_count = (
+        config.samples_per_record
+        * records_per_buffer
+        * config.channel_count
+    )
     size_bytes = sample_count * bytes_per_sample(board.bits_per_sample)
     buffers: list[DmaBuffer] = []
 
@@ -314,6 +330,7 @@ def arm_capture(
         records_per_acquisition=config.records_per_acquisition,
         buffers_per_acquisition=buffers_per_acquisition,
         bits_per_sample=board.bits_per_sample,
+        channel_count=config.channel_count,
     )
 
 
@@ -332,9 +349,15 @@ def copy_dma_buffer(
         )
     array_type = ctypes.c_uint16 * buffer.sample_count
     view = np.ctypeslib.as_array(array_type.from_address(buffer.address))
-    return view.copy().reshape(
-        session.records_per_buffer, session.samples_per_record
-    )
+    # NPT layout: record by record, and inside a record channel A then B.
+    shape = (session.records_per_buffer, session.samples_per_record)
+    if session.channel_count > 1:
+        shape = (
+            session.records_per_buffer,
+            session.channel_count,
+            session.samples_per_record,
+        )
+    return view.copy().reshape(shape)
 
 
 def wait_for_capture(
@@ -343,10 +366,14 @@ def wait_for_capture(
     if not session.started:
         raise RuntimeError("Call start_capture before wait_for_capture")
 
-    records = np.empty(
-        (session.records_per_acquisition, session.samples_per_record),
-        dtype=np.uint16,
-    )
+    shape = (session.records_per_acquisition, session.samples_per_record)
+    if session.channel_count > 1:
+        shape = (
+            session.records_per_acquisition,
+            session.channel_count,
+            session.samples_per_record,
+        )
+    records = np.empty(shape, dtype=np.uint16)
     buffer_count = len(session.buffers)
 
     for completed in range(session.buffers_per_acquisition):

@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .ats_api import ATSApi
+from .constants import CHANNEL_A, CHANNEL_B
 from .ats9371 import (
     BoardInfo,
     CaptureConfig,
@@ -31,6 +32,19 @@ class CaptureData:
     raw_codes: npt.NDArray[np.uint16]
     records_volts: npt.NDArray[np.float64]
     sample_rate_hz: float
+    reference_volts: npt.NDArray[np.float64] | None = None
+
+    def channel(self, channel: int) -> npt.NDArray[np.float64]:
+        """Return (records, samples) volts for CHANNEL_A or CHANNEL_B.
+
+        Single-channel captures only hold the configured channel; two-channel
+        captures have shape (records, 2, samples) in A, B order.
+        """
+        if self.records_volts.ndim == 2:
+            return self.records_volts
+        if channel not in (CHANNEL_A, CHANNEL_B):
+            raise ValueError("channel must be CHANNEL_A or CHANNEL_B")
+        return self.records_volts[:, 0 if channel == CHANNEL_A else 1, :]
 
     @property
     def time_s(self) -> npt.NDArray[np.float64]:

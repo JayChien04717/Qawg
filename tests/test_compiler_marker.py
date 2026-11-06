@@ -122,3 +122,44 @@ def test_result_reduction_names_match_the_saved_data_kind():
         np.mean(iq_traces, axis=0),
     )
     np.testing.assert_allclose(result.s21(), np.mean(iq_shots, axis=0))
+
+
+class AnchoredReadoutProgram(ExperimentProgram):
+    """T1-like: the pi pulse moves, the readout stays anchored."""
+
+    def _initialize(self, cfg):
+        from QAWG import ValuesSweep
+
+        self.declare_gen("q", ch=2, amplitude_vpp=0.5)
+        self.declare_gen("r", ch=1, amplitude_vpp=0.5)
+        self.declare_readout(
+            "ro", adc_channel="CHA", length=500 * ns, demod_freq=50e6,
+            waveform_ch=1, marker_channel=1, marker_lead=cfg.get("lead", 100 * ns),
+            marker_at_readout=cfg.get("marker_at_readout", True),
+        )
+        self.tau = self.add_sweep("tau", ValuesSweep([0.0, 2e-6, 4e-6]))
+        self.add_pulse("pi", gen="q", style="const", length=40 * ns, frequency=100e6)
+        self.add_pulse(
+            "ro_p", gen="r", style="const", length=500 * ns,
+            frequency=50e6, readout=True,
+        )
+
+    def _body(self, cfg):
+        self.play("pi", at=5e-6 - self.tau)
+        self.play("ro_p", at=cfg.get("readout_at", 5e-6))
+        self.trigger("ro")
+
+
+def test_marker_at_readout_follows_the_anchored_readout():
+    compiled = AnchoredReadoutProgram({}).compile(sample_rate_hz=1e9)
+    for marker in compiled.marker_waveforms:
+        assert np.flatnonzero(marker)[0] == 5000 - 100
+    assert compiled.trigger_delay_s == 100 * ns
+    np.testing.assert_allclose(compiled.readout_windows_s[:, 0], 5e-6)
+
+
+def test_marker_stays_at_step_start_by_default():
+    compiled = AnchoredReadoutProgram({"marker_at_readout": False}).compile(
+        sample_rate_hz=1e9
+    )
+    assert np.flatnonzero(compiled.marker_waveforms[0])[0] == 0

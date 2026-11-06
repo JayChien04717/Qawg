@@ -204,6 +204,24 @@ s21 = result.s21("ro")
 - ATS9371 收到 marker 後立即開始擷取完整 acquire window。
 - `trigger_delay` 是 acquire window 內 integration window 的起點。
 - 同一 sequence 內的 integration delay 必須固定。
+- `declare_readout(..., marker_at_readout=True)` 讓 marker 跟著 readout（T1、Ramsey 等 readout 在 step 後段的實驗），ADC 只錄 readout 附近；所有 step 的 readout 起點必須相同。
+
+## CHB 相位參考（waveguide QED）
+
+trigger 對 1 GS/s 取樣時脈有 ±½ sample 的量化，50 MHz IF 下造成約 5° 的 shot 間相位抖動。
+讓 AWG 另送一個參考音到 CHB，即可每 shot 修正：
+
+```python
+experiment = AWGAlazar.connect(
+    "TCPIP0::192.168.10.171::inst0::INSTR",
+    awg_sample_rate_hz=2.5e9,
+    acquire_window_s=3 * us,
+    adc_channel="CHA",          # 訊號
+    reference_channel="CHB",    # 參考音
+)
+```
+
+接線、參考音 program、emission 與 Wigner 流程請見 [QAWG_TUTORIAL_ZH.md](QAWG_TUTORIAL_ZH.md) 第 5 節。
 
 ## Demo
 
@@ -234,6 +252,7 @@ python -m pytest -q
 - ATS9371 acquisition path 目前固定為 1 GS/s、50 ohm、DC coupling 與
   +/-400 mV input range。
 
+從零開始的教學（waveform、readout、one/two-tone、Rabi、T1、Wigner）請見 [QAWG_TUTORIAL_ZH.md](QAWG_TUTORIAL_ZH.md)。
 更完整的 compiler 使用說明請參考
 [QAWG/README.md](QAWG/README.md)。Timeline helpers 位於
 [QAWG/timeline.py](QAWG/timeline.py)，AWG5208 底層 driver 說明位於

@@ -252,7 +252,57 @@ def clock_referenced_envelope(
     )
 
 
+def reference_phase(
+    reference_records_volts: npt.ArrayLike,
+    sample_rate_hz: float,
+    frequency_hz: float,
+    start_sample: int = 0,
+    stop_sample: int | None = None,
+) -> npt.NDArray[np.float64]:
+    """Return each record's phase (rad) of a reference tone."""
+    iq = integrate(
+        downconvert(reference_records_volts, sample_rate_hz, frequency_hz),
+        start_sample,
+        stop_sample,
+    )
+    return np.angle(iq)
+
+
+def circular_mean(angles_rad: npt.ArrayLike) -> float:
+    """Mean direction of angles; unaffected by the +/-pi wrap."""
+    return float(np.angle(np.mean(np.exp(1j * np.asarray(angles_rad)))))
+
+
+def apply_reference_correction(
+    baseband_iq: npt.ArrayLike,
+    reference_phase_rad: npt.ArrayLike,
+    *,
+    center_rad: float | None = None,
+    scale: float = 1.0,
+) -> tuple[npt.NDArray[np.complex128], npt.NDArray[np.float64]]:
+    """Remove per-record trigger/clock phase using a reference channel.
+
+    A timing error dt shifts a tone at frequency f by ``2*pi*f*dt``.  The
+    reference deviation (its phase minus ``center_rad``, wrapped to +/-pi) is
+    multiplied by ``scale`` (= signal frequency / reference frequency for a
+    pure timing error, 1 for a common phase) and removed from every record.
+    ``center_rad`` defaults to the circular mean over the records.
+
+    Returns ``(corrected_baseband, deviation_rad)``.
+    """
+    values = np.asarray(baseband_iq, dtype=np.complex128)
+    phase = np.asarray(reference_phase_rad, dtype=np.float64).reshape(-1)
+    if values.ndim != 2 or values.shape[0] != phase.size:
+        raise ValueError("need one reference phase per baseband record")
+    center = circular_mean(phase) if center_rad is None else float(center_rad)
+    deviation = np.angle(np.exp(1j * (phase - center)))
+    corrected = values * np.exp(-1j * scale * deviation)[:, None]
+    return corrected, deviation
+
+
 __all__ = [
+    "apply_reference_correction",
+    "circular_mean",
     "clock_referenced_envelope",
     "correct_interleaving_offsets",
     "design_lowpass_fir",
@@ -263,4 +313,5 @@ __all__ = [
     "moving_average_iq",
     "moving_average_time_axis",
     "phase_align_iq",
+    "reference_phase",
 ]
