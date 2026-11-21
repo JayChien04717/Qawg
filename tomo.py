@@ -47,6 +47,11 @@ from QAWG import AWGAlazar, ExperimentProgram, ValuesSweep, ns, us
 from QAWG.awg5200.waveforms import modulate_envelope
 from QAWG.instrument import RohdeSchwarzSGS100A
 from QAWG.tomography import (
+    annihilation_operator as _qawg_annihilation_operator,
+    complex_moment_stats,
+    deconvolve_amplifier_moments,
+    density_matrix_moments as _qawg_density_matrix_moments,
+    fit_density_matrix_from_moments as _qawg_fit_density_matrix_from_moments,
     heterodyne_ml_density_matrix,
     normalize_heterodyne_reference,
     project_temporal_mode,
@@ -122,6 +127,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--awg-channel", type=int, default=1)
     parser.add_argument("--marker-channel", type=int, default=1)
     parser.add_argument("--adc-channel", default="CHB")
+    parser.add_argument(
+        "--reference-channel",
+        default=None,
+        help="Optional second ADC channel carrying a phase-reference tone (e.g. CHA).",
+    )
+    parser.add_argument(
+        "--reference-frequency",
+        type=float,
+        default=None,
+        help="Optional reference-tone frequency in Hz (defaults to --if-frequency).",
+    )
     parser.add_argument("--awg-amplitude-vpp", type=float, default=0.5)
     parser.add_argument("--scan-gain", type=float, default=0.15)
     parser.add_argument("--load-gain", type=float, default=0.35)
@@ -974,7 +990,9 @@ def connect_hardware(
             trigger_level=140,
             tone_frequency_hz=args.if_frequency,
             integrate_window_ns=(0.0, args.readout_ns),
-            adc_channel="CHB",
+            adc_channel=args.adc_channel,
+            reference_channel=args.reference_channel,
+            reference_frequency_hz=args.reference_frequency,
             baseline_time_s=100 * ns,
             timeout_ms=30_000,
         )
@@ -1962,80 +1980,27 @@ def deconvolve_single_hemt_moments(
 ) -> ComplexArray:
     """Remove independent additive HEMT noise order by order.
 
-    Matrices use ``[m, n] = <(S*)**m S**n>``. The reference is the same
-    detector chain with vacuum at the signal input.
+    Delegates to :func:`QAWG.tomography.deconvolve_amplifier_moments`.
     """
-    measured = np.asarray(measured_signal, dtype=np.complex128)
-    noise = np.asarray(measured_reference, dtype=np.complex128)
-    if measured.shape != noise.shape or measured.ndim != 2:
-        raise ValueError("signal and reference moment matrices must match")
-    maximum_order = measured.shape[0] - 1
-    if measured.shape[1] != maximum_order + 1:
-        raise ValueError("moment matrices must be square")
-
-    signal = np.zeros_like(measured)
-    signal[0, 0] = 1.0
-    for m in range(maximum_order + 1):
-        for n in range(maximum_order + 1):
-            if m == 0 and n == 0:
-                continue
-            known = 0.0j
-            for i in range(m + 1):
-                for j in range(n + 1):
-                    if i == m and j == n:
-                        continue
-                    known += (
-                        math.comb(m, i)
-                        * math.comb(n, j)
-                        * signal[i, j]
-                        * noise[m - i, n - j]
-                    )
-            signal[m, n] = measured[m, n] - known
-    return signal
+    normal_moments, _ = deconvolve_amplifier_moments(
+        measured_signal,
+        measured_reference,
+    )
+    return normal_moments
 
 
 def fit_density_matrix_from_moments(
     target_moments: npt.ArrayLike,
     cutoff: int,
+    *,
+    moment_errors: npt.ArrayLike | None = None,
 ) -> ComplexArray:
     """Find a positive density matrix matching calibrated normal moments."""
-    target = np.asarray(target_moments, dtype=np.complex128)
-    maximum_order = target.shape[0] - 1
-    initial_matrix = np.eye(cutoff, dtype=np.complex128) / math.sqrt(cutoff)
-    initial = np.concatenate((initial_matrix.real.ravel(), initial_matrix.imag.ravel()))
-
-    def density(parameters: FloatArray) -> ComplexArray:
-        size = cutoff * cutoff
-        factor = (
-            parameters[:size].reshape(cutoff, cutoff)
-            + 1.0j * parameters[size:].reshape(cutoff, cutoff)
-        )
-        rho = factor @ np.conjugate(factor.T)
-        return np.asarray(rho / np.trace(rho), dtype=np.complex128)
-
-    indices = [
-        (m, n)
-        for m in range(maximum_order + 1)
-        for n in range(maximum_order + 1)
-        if 0 < m + n <= maximum_order
-    ]
-
-    def residual(parameters: FloatArray) -> FloatArray:
-        model = density_matrix_moments(density(parameters), maximum_order)
-        values = []
-        for m, n in indices:
-            scale = max(1e-3, abs(target[m, n]))
-            delta = (model[m, n] - target[m, n]) / scale
-            values.extend((delta.real, delta.imag))
-        return np.asarray(values, dtype=float)
-
-    result = least_squares(
-        residual,
-        initial,
-        loss="soft_l1",
-        max_nfev=10_000,
+    return _qawg_fit_density_matrix_from_moments(
+        target_moments,
+        cutoff,
+        moment_errors=moment_errors,
     )
-    return density(result.x)
 
 
 def analyze_single_hemt_run(
@@ -2067,27 +2032,28 @@ def analyze_single_hemt_run(
     offset = complex(np.mean(reference))
     reference_alpha = (reference - offset) / photon_scale_volts
     signal_alpha = (signal - offset) / photon_scale_volts
-    reference_moments = complex_moments(
-        complex_moment_sums(reference_alpha, maximum_order),
-        used,
+    reference_moments, reference_errors = complex_moment_stats(
+        reference_alpha,
+        maximum_order,
     )
-    measured_moments = complex_moments(
-        complex_moment_sums(signal_alpha, maximum_order),
-        used,
+    measured_moments, measured_errors = complex_moment_stats(
+        signal_alpha,
+        maximum_order,
     )
-    normal_moments = deconvolve_single_hemt_moments(
+    normal_moments, normal_errors = deconvolve_amplifier_moments(
         measured_moments,
         reference_moments,
+        signal_errors=measured_errors,
+        reference_errors=reference_errors,
     )
-    rho = fit_density_matrix_from_moments(normal_moments, cutoff)
+    rho = fit_density_matrix_from_moments(
+        normal_moments,
+        cutoff,
+        moment_errors=normal_errors,
+    )
     fitted_moments = density_matrix_moments(rho, maximum_order)
     axis = np.linspace(-2.5, 2.5, 51)
-    padded_rho = np.zeros(
-        (max(32, cutoff + 20), max(32, cutoff + 20)),
-        dtype=np.complex128,
-    )
-    padded_rho[:cutoff, :cutoff] = rho
-    wigner = wigner_function(padded_rho, axis, axis)
+    wigner = wigner_function(rho, axis, axis)
     population = np.maximum(np.real(np.diag(rho)), 0.0)
     named = named_operator_moments(rho)
     result = {

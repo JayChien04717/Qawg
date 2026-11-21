@@ -8,7 +8,7 @@ from .driver import (
 )
 from .transport import ScpiTransport, open_visa_transport
 from .models import AWGProgram, AWGStep, UploadedProgram
-from ..timeline import (
+from .timeline import (
     Delay,
     Parallel,
     Timeline,

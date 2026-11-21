@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import math
 import sys
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -14,6 +15,7 @@ import numpy.typing as npt
 from .ats_api import ATSApi
 from .constants import (
     ADMA_EXTERNAL_STARTCAPTURE,
+    ADMA_INTERLEAVE_SAMPLES,
     ADMA_NPT,
     ATS9371_BOARD_KIND,
     BW_LIMIT_DISABLE,
@@ -75,6 +77,7 @@ class CaptureConfig:
     timeout_ms: int = 5000
     channel: int = CHANNEL_A
     mask_external_trigger_lsb: bool = False
+    interleave_samples: bool = False
 
     def __post_init__(self) -> None:
         alignment = SAMPLES_PER_RECORD_ALIGNMENT
@@ -146,6 +149,7 @@ class CaptureSession:
     started: bool = False
     released: bool = False
     channel_count: int = 1
+    interleave_samples: bool = False
 
 
 def open_ats9371(
@@ -302,6 +306,9 @@ def arm_capture(
             buffers.append(DmaBuffer(address, sample_count, size_bytes))
 
         api.set_record_size(board.handle, 0, config.samples_per_record)
+        adma_flags = ADMA_NPT | ADMA_EXTERNAL_STARTCAPTURE
+        if config.interleave_samples and config.channel_count > 1:
+            adma_flags |= ADMA_INTERLEAVE_SAMPLES
         api.before_async_read(
             board.handle,
             config.channel,
@@ -309,7 +316,7 @@ def arm_capture(
             config.samples_per_record,
             records_per_buffer,
             config.records_per_acquisition,
-            ADMA_NPT | ADMA_EXTERNAL_STARTCAPTURE,
+            adma_flags,
         )
         for buffer in buffers:
             api.post_async_buffer(
@@ -331,6 +338,9 @@ def arm_capture(
         buffers_per_acquisition=buffers_per_acquisition,
         bits_per_sample=board.bits_per_sample,
         channel_count=config.channel_count,
+        interleave_samples=(
+            config.interleave_samples and config.channel_count > 1
+        ),
     )
 
 
@@ -339,9 +349,23 @@ def start_capture(api: ATSApi, session: CaptureSession) -> None:
     session.started = True
 
 
-def copy_dma_buffer(
+def view_dma_buffer(
     session: CaptureSession, buffer: DmaBuffer
 ) -> npt.NDArray[np.uint16]:
+    """Return a zero-copy numpy view of one completed DMA buffer.
+
+    The returned view always has logical shape:
+    - ``(records_per_buffer, samples_per_record)`` for single-channel captures;
+    - ``(records_per_buffer, channel_count, samples_per_record)`` for
+      dual-channel captures (channel A at index 0, channel B at index 1).
+
+    ATS9371 NPT memory layout:
+    - Without ``ADMA_INTERLEAVE_SAMPLES`` (default): channel-planar per buffer,
+      i.e. all records of channel A followed by all records of channel B
+      ``(channel_count, records_per_buffer, samples_per_record)``.
+    - With ``ADMA_INTERLEAVE_SAMPLES``: sample-interleaved ``ABAB...`` within
+      each record ``(records_per_buffer, samples_per_record, channel_count)``.
+    """
     if bytes_per_sample(session.bits_per_sample) != 2:
         raise RuntimeError(
             f"This first driver expects 16-bit transfers, got "
@@ -349,15 +373,51 @@ def copy_dma_buffer(
         )
     array_type = ctypes.c_uint16 * buffer.sample_count
     view = np.ctypeslib.as_array(array_type.from_address(buffer.address))
-    # NPT layout: record by record, and inside a record channel A then B.
-    shape = (session.records_per_buffer, session.samples_per_record)
-    if session.channel_count > 1:
-        shape = (
-            session.records_per_buffer,
-            session.channel_count,
-            session.samples_per_record,
+    if session.channel_count == 1:
+        return view.reshape(
+            session.records_per_buffer, session.samples_per_record
         )
-    return view.copy().reshape(shape)
+    if session.interleave_samples:
+        return view.reshape(
+            session.records_per_buffer,
+            session.samples_per_record,
+            session.channel_count,
+        ).transpose(0, 2, 1)
+    return view.reshape(
+        session.channel_count,
+        session.records_per_buffer,
+        session.samples_per_record,
+    ).transpose(1, 0, 2)
+
+
+def copy_dma_buffer(
+    session: CaptureSession, buffer: DmaBuffer
+) -> npt.NDArray[np.uint16]:
+    return np.array(view_dma_buffer(session, buffer), copy=True)
+
+
+def iter_capture_buffers(
+    api: ATSApi, session: CaptureSession, timeout_ms: int
+) -> Iterator[npt.NDArray[np.uint16]]:
+    """Yield one completed DMA buffer at a time in constant memory.
+
+    Each yielded array is a safe copy of ``records_per_buffer`` records; the
+    underlying DMA buffer is immediately re-posted to the board before the next
+    iteration resumes.
+    """
+    if not session.started:
+        raise RuntimeError("Call start_capture before iter_capture_buffers")
+
+    buffer_count = len(session.buffers)
+    for completed in range(session.buffers_per_acquisition):
+        buffer = session.buffers[completed % buffer_count]
+        api.wait_async_buffer(session.handle, buffer.address, timeout_ms)
+        chunk = copy_dma_buffer(session, buffer)
+        if completed + buffer_count < session.buffers_per_acquisition:
+            api.post_async_buffer(
+                session.handle, buffer.address, buffer.size_bytes
+            )
+        yield chunk
 
 
 def wait_for_capture(
@@ -382,7 +442,9 @@ def wait_for_capture(
 
         record_start = completed * session.records_per_buffer
         record_stop = record_start + session.records_per_buffer
-        records[record_start:record_stop] = copy_dma_buffer(session, buffer)
+        # Copy directly from the zero-copy DMA view into the destination slice
+        # before re-posting the buffer, avoiding an intermediate allocation.
+        records[record_start:record_stop] = view_dma_buffer(session, buffer)
 
         if completed + buffer_count < session.buffers_per_acquisition:
             api.post_async_buffer(

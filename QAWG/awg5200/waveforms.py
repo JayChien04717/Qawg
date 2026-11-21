@@ -250,22 +250,13 @@ def gaussian_square_ns(
     edge_sigmas: float = 4.0,
 ) -> FloatArray:
     """Return a flat pulse with Gaussian rising and falling edges."""
-    if edge_sigma_ns <= 0:
-        raise ValueError("edge_sigma_ns must be positive")
-    if edge_sigmas <= 0:
-        raise ValueError("edge_sigmas must be positive")
-    number_of_samples = ns_to_samples(duration_ns, sample_rate_hz)
-    edge_samples = int(round(edge_sigma_ns * edge_sigmas * 1e-9 * sample_rate_hz))
-    if 2 * edge_samples >= number_of_samples:
-        raise ValueError("duration_ns is too short for the requested Gaussian edges")
-
-    envelope = np.full(number_of_samples, amplitude_volts, dtype=np.float64)
-    sigma_samples = edge_sigma_ns * 1e-9 * sample_rate_hz
-    edge_index = np.arange(edge_samples, dtype=np.float64)
-    rising = np.exp(-0.5 * ((edge_index - edge_samples) / sigma_samples) ** 2)
-    envelope[:edge_samples] *= rising
-    envelope[-edge_samples:] *= rising[::-1]
-    return envelope
+    return gaussian_square(
+        number_of_samples=ns_to_samples(duration_ns, sample_rate_hz),
+        sample_rate_hz=sample_rate_hz,
+        sigma_s=edge_sigma_ns * 1e-9,
+        amplitude_volts=amplitude_volts,
+        edge_sigmas=edge_sigmas,
+    )
 
 
 def cosine_square_ns(
@@ -300,9 +291,9 @@ def triangle(
     # 計算與中心點的絕對距離
     distance = np.abs(time - center)
     
-    # 線性遞減，超出 half_width_s 的部分強制歸零
-    envelope = amplitude_volts * (1.0 - distance / half_width_s)
-    return np.maximum(0.0, envelope)
+    # 線性遞減，超出 half_width_s 的部分強制歸零（保留負振幅符號）
+    envelope = np.maximum(0.0, 1.0 - distance / half_width_s)
+    return amplitude_volts * envelope
 
 
 def triangle_cosine(

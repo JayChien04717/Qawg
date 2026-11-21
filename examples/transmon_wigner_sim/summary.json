@@ -1,0 +1,74 @@
+{
+  "parameters": {
+    "n_shots_per_state": 80000,
+    "t1_ns": 80.0,
+    "tau_amp_ns": 160.0,
+    "noise_photons": 3.0,
+    "collection_efficiency_eta": 0.9,
+    "photon_scale_volts": 0.008,
+    "single_shot_snr_db": -6.478174818886375,
+    "pca_mode_overlap_2000_shots": 0.9245532281851297
+  },
+  "states": {
+    "vacuum": {
+      "mean_photon_number_deconvolved": 0.0,
+      "mean_photon_number_err": 0.019877710192390728,
+      "g2_numerator_deconvolved": 0.0,
+      "g2_numerator_err": 0.4754593744432839,
+      "coherence_a_deconvolved": [
+        0.0,
+        0.0
+      ],
+      "fock_populations": [
+        0.9999999999972038,
+        8.975101991891911e-13,
+        1.8756973697213125e-12,
+        2.310924296786261e-14
+      ],
+      "rho_01_real": 5.348687644093609e-13,
+      "rho_01_imag": 1.3098484648596251e-14,
+      "wigner_origin": 0.6366197723664093,
+      "wigner_min": 8.841339676269432e-12
+    },
+    "plus": {
+      "mean_photon_number_deconvolved": 0.4754812851145873,
+      "mean_photon_number_err": 0.02142720460580062,
+      "g2_numerator_deconvolved": -0.11942917470511816,
+      "g2_numerator_err": 0.5269098896382051,
+      "coherence_a_deconvolved": [
+        0.45519673903908164,
+        -0.0022074943689584705
+      ],
+      "fock_populations": [
+        0.5349985333277288,
+        0.45558399397529803,
+        0.008350988136477767,
+        0.0010664845604952795
+      ],
+      "rho_01_real": 0.4511951751579102,
+      "rho_01_imag": 0.014193759848090135,
+      "wigner_origin": 0.05519432497357364,
+      "wigner_min": -0.1704990883454673
+    },
+    "fock1": {
+      "mean_photon_number_deconvolved": 0.9239169513790886,
+      "mean_photon_number_err": 0.0219110269624157,
+      "g2_numerator_deconvolved": 0.2700244264503624,
+      "g2_numerator_err": 0.5538716737875021,
+      "coherence_a_deconvolved": [
+        0.009111303235909158,
+        0.0029259214108545836
+      ],
+      "fock_populations": [
+        0.19629470771557078,
+        0.6982933882138895,
+        0.09061103966701374,
+        0.014800864403526051
+      ],
+      "rho_01_real": -0.023891066472345835,
+      "rho_01_imag": -0.02252462662453202,
+      "wigner_origin": -0.2713200291882779,
+      "wigner_min": -0.2728253679934529
+    }
+  }
+}

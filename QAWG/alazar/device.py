@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from types import TracebackType
 
@@ -21,6 +21,7 @@ from .ats9371 import (
     arm_capture,
     configure_ats9371,
     free_capture,
+    iter_capture_buffers,
     open_ats9371,
     start_capture,
     wait_for_capture,
@@ -100,6 +101,32 @@ class ArmedCapture:
             sample_rate_hz=self.config.sample_rate_hz,
         )
 
+    def iter_buffers(self) -> Iterator[CaptureData]:
+        """Yield one ``CaptureData`` per completed DMA buffer in constant RAM."""
+        if self._closed:
+            raise RuntimeError("capture session is closed")
+        if self._collected:
+            raise RuntimeError("capture data has already been collected")
+        self._collected = True
+        for raw_codes in iter_capture_buffers(
+            self._api,
+            self._session,
+            self.config.timeout_ms,
+        ):
+            records_volts = adc_codes_to_volts(
+                raw_codes,
+                self._board.bits_per_sample,
+                self.config.input_range_volts,
+                mask_external_trigger_lsb=(
+                    self.config.mask_external_trigger_lsb
+                ),
+            )
+            yield CaptureData(
+                raw_codes=raw_codes,
+                records_volts=records_volts,
+                sample_rate_hz=self.config.sample_rate_hz,
+            )
+
     def close(self) -> None:
         if self._closed:
             return
@@ -169,6 +196,27 @@ class Alazar9371:
             if start_callback is not None:
                 start_callback()
             return armed.collect()
+
+    def stream_capture(
+        self,
+        config: CaptureConfig,
+        on_buffer: Callable[[CaptureData], None],
+        *,
+        start_callback: Callable[[], None] | None = None,
+    ) -> int:
+        """Stream DMA buffers through ``on_buffer`` in constant memory.
+
+        Returns the total number of records delivered.
+        """
+        total_records = 0
+        with self.arm(config) as armed:
+            armed.start()
+            if start_callback is not None:
+                start_callback()
+            for chunk in armed.iter_buffers():
+                on_buffer(chunk)
+                total_records += int(chunk.records_volts.shape[0])
+        return total_records
 
     def __enter__(self) -> "Alazar9371":
         return self

@@ -87,10 +87,11 @@ def test_capture_config_accepts_two_channels():
         CaptureConfig(samples_per_record=256, channel=4)
 
 
-def test_dual_channel_dma_buffer_is_split_record_then_channel(monkeypatch):
+def test_dual_channel_dma_buffer_is_split_channel_planar_npt(monkeypatch):
     import ctypes
 
     records, channels, samples = 3, 2, 8
+    # ATS9371 non-interleaved NPT layout: all records of CHA, then all records of CHB.
     data = np.arange(records * channels * samples, dtype=np.uint16)
     backing = (ctypes.c_uint16 * data.size)(*data)
     session = CaptureSession(
@@ -102,12 +103,68 @@ def test_dual_channel_dma_buffer_is_split_record_then_channel(monkeypatch):
         buffers_per_acquisition=1,
         bits_per_sample=16,
         channel_count=channels,
+        interleave_samples=False,
     )
     buffer = DmaBuffer(ctypes.addressof(backing), data.size, data.size * 2)
     result = copy_dma_buffer(session, buffer)
     assert result.shape == (records, channels, samples)
-    np.testing.assert_array_equal(result[1, 0], data[16:24])  # record 1, CHA
-    np.testing.assert_array_equal(result[1, 1], data[24:32])  # record 1, CHB
+    np.testing.assert_array_equal(result[1, 0], data[8:16])   # record 1, CHA
+    np.testing.assert_array_equal(result[1, 1], data[32:40])  # record 1, CHB
+
+
+def test_dual_channel_dma_buffer_interleaved_mode():
+    import ctypes
+
+    records, channels, samples = 3, 2, 8
+    # ATS9371 ADMA_INTERLEAVE_SAMPLES layout: ABAB... within each record.
+    cha = np.arange(records * samples, dtype=np.uint16).reshape(records, samples)
+    chb = (1000 + cha).astype(np.uint16)
+    interleaved = np.stack([cha, chb], axis=-1).reshape(-1)
+    backing = (ctypes.c_uint16 * interleaved.size)(*interleaved)
+    session = CaptureSession(
+        handle=1,
+        buffers=[],
+        samples_per_record=samples,
+        records_per_buffer=records,
+        records_per_acquisition=records,
+        buffers_per_acquisition=1,
+        bits_per_sample=16,
+        channel_count=channels,
+        interleave_samples=True,
+    )
+    buffer = DmaBuffer(
+        ctypes.addressof(backing), interleaved.size, interleaved.size * 2
+    )
+    result = copy_dma_buffer(session, buffer)
+    assert result.shape == (records, channels, samples)
+    np.testing.assert_array_equal(result[:, 0, :], cha)
+    np.testing.assert_array_equal(result[:, 1, :], chb)
+
+
+def test_reference_phase_rejects_dropped_reference_tone():
+    dead_ref = np.zeros((4, SAMPLES), dtype=np.float64)
+    with pytest.raises(ValueError, match="min_amplitude"):
+        reference_phase(
+            dead_ref, SAMPLE_RATE, 50e6, 100, 900, min_amplitude=1e-4
+        )
+
+
+def test_reference_unwrap_prevents_non_integer_scale_phase_jump():
+    # Slow timing drift that causes f_ref=50 MHz phase to sweep past +pi
+    # while f_sig=75 MHz (non-integer scale=1.5).
+    shifts = np.linspace(0.0, 15e-9, 60)  # 0 to 1.5*pi on 50 MHz ref
+    signal = _records(shifts, 75e6, 0.3)
+    reference = _records(shifts, 50e6, 0.0)
+    phase = reference_phase(reference, SAMPLE_RATE, 50e6, 100, 900)
+    corrected, _ = apply_reference_correction(
+        downconvert(signal, SAMPLE_RATE, 75e6),
+        phase,
+        scale=75e6 / 50e6,
+        unwrap=True,
+    )
+    shots = integrate(corrected, 100, 900)
+    spread = np.angle(shots * np.exp(-1j * np.angle(shots.mean())))
+    assert np.std(spread) < 5e-3
 
 
 def test_capture_data_channel_selects_a_or_b():

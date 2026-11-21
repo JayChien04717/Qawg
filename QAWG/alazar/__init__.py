@@ -13,16 +13,22 @@ from .ats9371 import (
     configure_channel,
     free_capture,
     get_board_info,
+    iter_capture_buffers,
     open_ats9371,
     start_capture,
+    view_dma_buffer,
     wait_for_capture,
 )
 from .ats_api import ATSApi, AlazarError
 from .device import Alazar9371, ArmedCapture, CaptureData
 from .dsp import (
+    DemodulationConfig,
+    DemodulationPipeline,
+    DemodulationResult,
     apply_reference_correction,
     circular_mean,
     reference_phase,
+    remove_record_dc_offset,
     clock_referenced_envelope,
     correct_interleaving_offsets,
     design_lowpass_fir,
@@ -36,9 +42,13 @@ from .dsp import (
 )
 
 __all__ = [
+    "DemodulationConfig",
+    "DemodulationPipeline",
+    "DemodulationResult",
     "apply_reference_correction",
     "circular_mean",
     "reference_phase",
+    "remove_record_dc_offset",
     "ATSApi",
     "AlazarError",
     "Alazar9371",
@@ -59,6 +69,7 @@ __all__ = [
     "downconvert",
     "fir_filter",
     "integrate",
+    "iter_capture_buffers",
     "clock_referenced_envelope",
     "moving_average_iq",
     "moving_average_time_axis",
@@ -68,5 +79,6 @@ __all__ = [
     "get_board_info",
     "open_ats9371",
     "start_capture",
+    "view_dma_buffer",
     "wait_for_capture",
 ]

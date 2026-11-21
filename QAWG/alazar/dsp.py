@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import functools
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
+
+from .constants import CHANNEL_A
+
+if TYPE_CHECKING:
+    from .device import CaptureData
 
 
 def _records(values: npt.ArrayLike) -> npt.NDArray[np.float64]:
@@ -252,19 +259,51 @@ def clock_referenced_envelope(
     )
 
 
+def remove_record_dc_offset(
+    records_volts: npt.ArrayLike,
+) -> npt.NDArray[np.float64]:
+    """Subtract the per-record mean voltage from each trace."""
+    records = _records(records_volts)
+    return records - np.mean(records, axis=1, keepdims=True)
+
+
 def reference_phase(
     reference_records_volts: npt.ArrayLike,
     sample_rate_hz: float,
     frequency_hz: float,
     start_sample: int = 0,
     stop_sample: int | None = None,
+    *,
+    min_amplitude: float = 0.0,
 ) -> npt.NDArray[np.float64]:
-    """Return each record's phase (rad) of a reference tone."""
-    iq = integrate(
-        downconvert(reference_records_volts, sample_rate_hz, frequency_hz),
-        start_sample,
-        stop_sample,
+    """Return each record's phase (rad) of a reference tone.
+
+    Slices ``start_sample:stop_sample`` before downconversion while preserving
+    the sample-0 phase origin, avoiding unnecessary full-record mixing.
+    If ``min_amplitude > 0``, raises ``ValueError`` when any record's
+    reference tone drops below that threshold (e.g. unplugged or muted ref).
+    """
+    records = _records(reference_records_volts)
+    start = int(start_sample)
+    stop = records.shape[1] if stop_sample is None else int(stop_sample)
+    if not 0 <= start < stop <= records.shape[1]:
+        raise ValueError("reference window is outside the acquired record")
+    if min_amplitude < 0:
+        raise ValueError("min_amplitude cannot be negative")
+    windowed = records[:, start:stop]
+    phase_origin = 2.0 * np.pi * frequency_hz * (start / sample_rate_hz)
+    iq = np.mean(
+        downconvert(windowed, sample_rate_hz, frequency_hz, phase_origin),
+        axis=1,
     )
+    if min_amplitude > 0.0:
+        amplitudes = np.abs(iq)
+        min_seen = float(np.min(amplitudes))
+        if min_seen < min_amplitude:
+            raise ValueError(
+                f"reference tone amplitude dropped to {min_seen:.3e} V "
+                f"(below min_amplitude={min_amplitude:.3e} V)"
+            )
     return np.angle(iq)
 
 
@@ -279,14 +318,19 @@ def apply_reference_correction(
     *,
     center_rad: float | None = None,
     scale: float = 1.0,
+    unwrap: bool = False,
 ) -> tuple[npt.NDArray[np.complex128], npt.NDArray[np.float64]]:
     """Remove per-record trigger/clock phase using a reference channel.
 
     A timing error dt shifts a tone at frequency f by ``2*pi*f*dt``.  The
-    reference deviation (its phase minus ``center_rad``, wrapped to +/-pi) is
-    multiplied by ``scale`` (= signal frequency / reference frequency for a
-    pure timing error, 1 for a common phase) and removed from every record.
+    reference deviation (its phase minus ``center_rad``) is multiplied by
+    ``scale`` (= signal frequency / reference frequency for a pure timing
+    error, 1 for a common phase) and removed from every record.
     ``center_rad`` defaults to the circular mean over the records.
+
+    When ``unwrap=True`` (recommended for slow phase drift when ``scale`` is
+    non-integer), the reference phase is unwrapped across records before
+    scaling so crossing ``+/-pi`` does not introduce a ``2*pi*scale`` jump.
 
     Returns ``(corrected_baseband, deviation_rad)``.
     """
@@ -295,12 +339,185 @@ def apply_reference_correction(
     if values.ndim != 2 or values.shape[0] != phase.size:
         raise ValueError("need one reference phase per baseband record")
     center = circular_mean(phase) if center_rad is None else float(center_rad)
-    deviation = np.angle(np.exp(1j * (phase - center)))
+    if unwrap and phase.size > 0:
+        first_delta = float(np.angle(np.exp(1j * (phase[0] - center))))
+        deviation = first_delta + (np.unwrap(phase) - phase[0])
+    else:
+        deviation = np.angle(np.exp(1j * (phase - center)))
     corrected = values * np.exp(-1j * scale * deviation)[:, None]
     return corrected, deviation
 
 
+@dataclass(frozen=True)
+class DemodulationConfig:
+    """Configuration for standalone ATS9371 receive-side DSP."""
+
+    sample_rate_hz: float
+    tone_frequency_hz: float
+    integrate_start_sample: int = 0
+    integrate_stop_sample: int | None = None
+    integration_weights: npt.ArrayLike | None = None
+    reference_phase_radians: float = 0.0
+    baseline_stop_sample: int | None = None
+    remove_dc_offset: bool = True
+    fir_cutoff_hz: float = 20e6
+    fir_number_of_taps: int = 41
+    fir_kaiser_beta: float = 6.0
+    reference_frequency_hz: float | None = None
+    reference_start_sample: int | None = None
+    reference_stop_sample: int | None = None
+    reference_center_rad: float | None = None
+    reference_unwrap: bool = False
+    reference_min_amplitude: float = 0.0
+
+
+@dataclass(frozen=True)
+class DemodulationResult:
+    """Outputs from one receive-side demodulation pass."""
+
+    signal_volts: npt.NDArray[np.float64]
+    reference_volts: npt.NDArray[np.float64] | None
+    baseband_iq: npt.NDArray[np.complex128]
+    filtered_iq: npt.NDArray[np.complex128] | None
+    shots_iq: npt.NDArray[np.complex128]
+    reference_deviation_rad: npt.NDArray[np.float64] | None
+
+
+class DemodulationPipeline:
+    """Standalone receive-side DSP chain for Alazar9371 captures.
+
+    Performs optional interleaving-offset removal, DC removal, downconversion,
+    optional second-channel phase-reference correction, optional FIR lowpass
+    filtering, and windowed IQ integration without requiring an AWG wrapper.
+    """
+
+    def __init__(self, config: DemodulationConfig) -> None:
+        self.config = config
+
+    def clean(self, records_volts: npt.ArrayLike) -> npt.NDArray[np.float64]:
+        records = _records(records_volts)
+        if self.config.baseline_stop_sample is not None:
+            records = correct_interleaving_offsets(
+                records,
+                stop_sample=self.config.baseline_stop_sample,
+                period=2,
+            )
+        if self.config.remove_dc_offset:
+            records = remove_record_dc_offset(records)
+        return records
+
+    def process(
+        self,
+        signal_volts: npt.ArrayLike,
+        reference_volts: npt.ArrayLike | None = None,
+        *,
+        compute_fir: bool = True,
+        already_cleaned: bool = False,
+    ) -> DemodulationResult:
+        cfg = self.config
+        signal = (
+            _records(signal_volts)
+            if already_cleaned
+            else self.clean(signal_volts)
+        )
+        reference = (
+            None
+            if reference_volts is None
+            else (
+                _records(reference_volts)
+                if already_cleaned
+                else self.clean(reference_volts)
+            )
+        )
+        baseband = downconvert(
+            signal,
+            cfg.sample_rate_hz,
+            cfg.tone_frequency_hz,
+            cfg.reference_phase_radians,
+        )
+        deviation: npt.NDArray[np.float64] | None = None
+        if reference is not None:
+            f_ref = (
+                cfg.tone_frequency_hz
+                if cfg.reference_frequency_hz is None
+                else cfg.reference_frequency_hz
+            )
+            ref_start = (
+                cfg.integrate_start_sample
+                if cfg.reference_start_sample is None
+                else cfg.reference_start_sample
+            )
+            ref_stop = (
+                cfg.integrate_stop_sample
+                if cfg.reference_stop_sample is None
+                else cfg.reference_stop_sample
+            )
+            phase = reference_phase(
+                reference,
+                cfg.sample_rate_hz,
+                f_ref,
+                ref_start,
+                ref_stop,
+                min_amplitude=cfg.reference_min_amplitude,
+            )
+            scale = (
+                1.0 if f_ref == 0.0 else cfg.tone_frequency_hz / f_ref
+            )
+            baseband, deviation = apply_reference_correction(
+                baseband,
+                phase,
+                center_rad=cfg.reference_center_rad,
+                scale=scale,
+                unwrap=cfg.reference_unwrap,
+            )
+
+        filtered = (
+            fir_filter(
+                baseband,
+                cfg.sample_rate_hz,
+                cfg.fir_cutoff_hz,
+                cfg.fir_number_of_taps,
+                cfg.fir_kaiser_beta,
+            )
+            if compute_fir
+            else None
+        )
+        shots = integrate(
+            baseband,
+            cfg.integrate_start_sample,
+            cfg.integrate_stop_sample,
+            cfg.integration_weights,
+        )
+        return DemodulationResult(
+            signal_volts=signal,
+            reference_volts=reference,
+            baseband_iq=baseband,
+            filtered_iq=filtered,
+            shots_iq=shots,
+            reference_deviation_rad=deviation,
+        )
+
+    def process_capture(
+        self,
+        capture: "CaptureData",
+        *,
+        signal_channel: int = CHANNEL_A,
+        reference_channel: int | None = None,
+        compute_fir: bool = True,
+    ) -> DemodulationResult:
+        signal = capture.channel(signal_channel)
+        reference = (
+            None
+            if reference_channel is None
+            else capture.channel(reference_channel)
+        )
+        return self.process(signal, reference, compute_fir=compute_fir)
+
+
 __all__ = [
+    "DemodulationConfig",
+    "DemodulationPipeline",
+    "DemodulationResult",
     "apply_reference_correction",
     "circular_mean",
     "clock_referenced_envelope",
@@ -314,4 +531,5 @@ __all__ = [
     "moving_average_time_axis",
     "phase_align_iq",
     "reference_phase",
+    "remove_record_dc_offset",
 ]

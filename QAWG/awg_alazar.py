@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
@@ -15,14 +16,12 @@ from .alazar import (
     BoardInfo,
     CaptureConfig,
     CaptureData,
+    DemodulationConfig,
+    DemodulationPipeline,
+    DemodulationResult,
     TriggerConfig,
-    apply_reference_correction,
-    correct_interleaving_offsets,
-    downconvert,
-    fir_filter,
-    integrate,
     open_ats9371,
-    reference_phase,
+    remove_record_dc_offset,
 )
 from .alazar.constants import (
     CHANNEL_A,
@@ -48,12 +47,6 @@ def validate_average_count(n_average: int) -> int:
     if averages < 1:
         raise ValueError("n_average must be positive")
     return averages
-
-
-def remove_record_dc_offset(
-    records: npt.NDArray[np.float64],
-) -> npt.NDArray[np.float64]:
-    return records - np.mean(records, axis=1, keepdims=True)
 
 
 def normalize_adc_channel(channel: str | int) -> int:
@@ -124,6 +117,9 @@ class AWGAlazar:
         reference_frequency_hz: float | None = None,
         reference_window_ns: tuple[float, float] | None = None,
         reference_center_rad: float | None = None,
+        reference_unwrap: bool = False,
+        reference_min_amplitude: float = 0.0,
+        interleave_samples: bool = False,
     ) -> None:
         self.awg = awg
         self.ats_api = ats_api
@@ -197,6 +193,9 @@ class AWGAlazar:
         self.reference_center_rad = (
             None if reference_center_rad is None else float(reference_center_rad)
         )
+        self.reference_unwrap = bool(reference_unwrap)
+        self.reference_min_amplitude = float(reference_min_amplitude)
+        self.interleave_samples = bool(interleave_samples)
 
         self.last_reference_volts: npt.NDArray[np.float64] | None = None
         self.last_reference_deviation_rad: npt.NDArray[np.float64] | None = None
@@ -532,7 +531,10 @@ class AWGAlazar:
             remove_dc_offset=compiled.remove_dc_offset,
         )
         records = capture.records_volts
-        downconverted, weighted_shots, _ = self._demodulate(records)
+        downconverted, weighted_shots, _ = self._demodulate(
+            records,
+            reference_volts=capture.reference_volts,
+        )
         raw_time_s = (
             np.arange(records.shape[1], dtype=np.float64)
             / self.alazar_sample_rate_hz
@@ -602,7 +604,52 @@ class AWGAlazar:
             timeout_ms=self.timeout_ms,
             channel=self._digitizer_channels,
             mask_external_trigger_lsb=self.mask_external_trigger_lsb,
+            interleave_samples=self.interleave_samples,
         )
+
+    def _demodulation_pipeline(
+        self,
+        *,
+        remove_dc_offset: bool,
+    ) -> DemodulationPipeline:
+        integrate_start, integrate_stop = self.integrate_window_cycles
+        ref_start: int | None = None
+        ref_stop: int | None = None
+        if self.reference_window_ns is not None:
+            ref_start = self.ns2cycles(self.reference_window_ns[0], inst="adc")
+            ref_stop = self.ns2cycles(self.reference_window_ns[1], inst="adc")
+        baseline_stop = (
+            None
+            if self.baseline_time_s is None
+            else self.ns2cycles(self.baseline_time_s * 1e9, inst="adc")
+        )
+        return DemodulationPipeline(
+            DemodulationConfig(
+                sample_rate_hz=self.alazar_sample_rate_hz,
+                tone_frequency_hz=self.tone_frequency_hz,
+                integrate_start_sample=integrate_start,
+                integrate_stop_sample=integrate_stop,
+                integration_weights=self.integration_weights,
+                reference_phase_radians=self.reference_phase_radians,
+                baseline_stop_sample=baseline_stop,
+                remove_dc_offset=remove_dc_offset,
+                fir_cutoff_hz=self.fir_cutoff_hz,
+                fir_number_of_taps=self.fir_number_of_taps,
+                fir_kaiser_beta=self.fir_kaiser_beta,
+                reference_frequency_hz=self.reference_frequency_hz,
+                reference_start_sample=ref_start,
+                reference_stop_sample=ref_stop,
+                reference_center_rad=self.reference_center_rad,
+                reference_unwrap=self.reference_unwrap,
+                reference_min_amplitude=self.reference_min_amplitude,
+            )
+        )
+
+    def _prepare_awg_for_capture(self) -> None:
+        if self._uploaded_sequence_name is None:
+            self.awg.stop()
+        else:
+            self.awg.rewind_sequence(self._uploaded_sequence_name)
 
     def _capture_data(
         self,
@@ -611,10 +658,7 @@ class AWGAlazar:
         remove_dc_offset: bool = False,
     ) -> CaptureData:
         config = self._acquisition_config(n_average=n_average)
-        if self._uploaded_sequence_name is None:
-            self.awg.stop()
-        else:
-            self.awg.rewind_sequence(self._uploaded_sequence_name)
+        self._prepare_awg_for_capture()
         try:
             capture = self.alazar.capture(
                 config,
@@ -624,30 +668,13 @@ class AWGAlazar:
             with suppress(Exception):
                 self.awg.stop()
 
-        signal = capture.channel(self.adc_channel)
+        pipeline = self._demodulation_pipeline(remove_dc_offset=remove_dc_offset)
+        signal = pipeline.clean(capture.channel(self.adc_channel))
         reference = (
             None
             if self.reference_channel is None
-            else capture.channel(self.reference_channel)
+            else pipeline.clean(capture.channel(self.reference_channel))
         )
-
-        def clean(records: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-            if self.baseline_time_s is not None:
-                records = correct_interleaving_offsets(
-                    records,
-                    stop_sample=self.ns2cycles(
-                        self.baseline_time_s * 1e9,
-                        inst="adc",
-                    ),
-                    period=2,
-                )
-            if remove_dc_offset:
-                records = remove_record_dc_offset(records)
-            return records
-
-        signal = clean(signal)
-        if reference is not None:
-            reference = clean(reference)
         capture = CaptureData(
             raw_codes=capture.raw_codes,
             records_volts=signal,
@@ -661,91 +688,44 @@ class AWGAlazar:
         self.last_reference_volts = reference
         return capture
 
-    def _baseband(
-        self,
-        capture_records: npt.NDArray[np.float64],
-    ) -> npt.NDArray[np.complex128]:
-        """Downconvert signal records, removing reference-channel jitter."""
-        baseband = downconvert(
-            capture_records,
-            self.alazar_sample_rate_hz,
-            self.tone_frequency_hz,
-            self.reference_phase_radians,
-        )
-        reference = self.last_reference_volts
-        if self.reference_channel is None or reference is None:
-            self.last_reference_deviation_rad = None
-            return baseband
-        f_ref = (
-            self.tone_frequency_hz
-            if self.reference_frequency_hz is None
-            else self.reference_frequency_hz
-        )
-        start_ns, stop_ns = (
-            self.integrate_window_ns
-            if self.reference_window_ns is None
-            else self.reference_window_ns
-        )
-        phase = reference_phase(
-            reference,
-            self.alazar_sample_rate_hz,
-            f_ref,
-            self.ns2cycles(start_ns, inst="adc"),
-            self.ns2cycles(stop_ns, inst="adc"),
-        )
-        corrected, deviation = apply_reference_correction(
-            baseband,
-            phase,
-            center_rad=self.reference_center_rad,
-            scale=self.tone_frequency_hz / f_ref,
-        )
-        self.last_reference_deviation_rad = deviation
-        return corrected
-
     def _demodulate(
         self,
         records: npt.NDArray[np.float64],
+        *,
+        reference_volts: npt.NDArray[np.float64] | None = None,
+        compute_fir: bool = True,
     ) -> tuple[
         npt.NDArray[np.complex128],
         npt.NDArray[np.complex128],
         slice,
     ]:
-        """Downconvert once; return FIR traces, integrated shots, window.
+        """Downconvert once via Alazar DemodulationPipeline.
 
         Integration uses the unfiltered baseband so the FIR does not smear
-        the window edges. Also records ``last_downconverted_iq`` and
-        ``last_shot_iq``.
+        the window edges. Also records ``last_downconverted_iq``,
+        ``last_shot_iq``, and ``last_reference_deviation_rad``.
         """
-        baseband = self._baseband(records)
-        filtered = self._lowpass_downconverted_iq(baseband)
-        window = self._integration_slice(filtered.shape[1])
-        shots = integrate(
-            baseband,
-            window.start,
-            window.stop,
-            self.integration_weights,
+        window = self._integration_slice(records.shape[1])
+        pipeline = self._demodulation_pipeline(remove_dc_offset=False)
+        demod = pipeline.process(
+            records,
+            reference_volts=reference_volts,
+            compute_fir=compute_fir,
+            already_cleaned=True,
         )
-        self.last_downconverted_iq = filtered
-        self.last_shot_iq = shots
-        return filtered, shots, window
+        self.last_reference_deviation_rad = demod.reference_deviation_rad
+        trace_out = (
+            demod.filtered_iq if demod.filtered_iq is not None else demod.baseband_iq
+        )
+        self.last_downconverted_iq = trace_out
+        self.last_shot_iq = demod.shots_iq
+        return trace_out, demod.shots_iq, window
 
     def _integration_slice(self, number_of_samples: int) -> slice:
         start, stop = self.integrate_window_cycles
         if not 0 <= start < stop <= number_of_samples:
             raise ValueError("integration window is outside the acquired record")
         return slice(start, stop)
-
-    def _lowpass_downconverted_iq(
-        self,
-        baseband: npt.NDArray[np.complex128],
-    ) -> npt.NDArray[np.complex128]:
-        return fir_filter(
-            baseband,
-            self.alazar_sample_rate_hz,
-            self.fir_cutoff_hz,
-            self.fir_number_of_taps,
-            self.fir_kaiser_beta,
-        )
 
     def acquire_decimate(
         self,
@@ -766,7 +746,11 @@ class AWGAlazar:
                 else bool(remove_dc_offset)
             ),
         )
-        filtered, _, window = self._demodulate(capture.records_volts)
+        filtered, _, window = self._demodulate(
+            capture.records_volts,
+            reference_volts=capture.reference_volts,
+            compute_fir=True,
+        )
         self.last_time_s = capture.time_s
         return (
             capture.time_s[window],
@@ -792,18 +776,63 @@ class AWGAlazar:
                 else bool(remove_dc_offset)
             ),
         )
-        window = self._integration_slice(capture.records_volts.shape[1])
-        baseband = self._baseband(capture.records_volts)
-        shots = integrate(
-            baseband,
-            window.start,
-            window.stop,
-            self.integration_weights,
+        _, shots, _ = self._demodulate(
+            capture.records_volts,
+            reference_volts=capture.reference_volts,
+            compute_fir=False,
         )
-        self.last_downconverted_iq = baseband
-        self.last_shot_iq = shots
         self.last_time_s = capture.time_s
         return shots.copy(), np.complex128(np.mean(shots))
+
+    def stream_acquire(
+        self,
+        n_average: int,
+        *,
+        on_chunk: Callable[[DemodulationResult], None] | None = None,
+        remove_dc_offset: bool | None = None,
+        compute_fir: bool = False,
+    ) -> npt.NDArray[np.complex128]:
+        """Stream DMA buffers through DSP in constant memory.
+
+        Suitable for large shot counts (e.g. ``10^5 - 10^6`` shots for
+        transmon Wigner tomography) where holding all raw traces in RAM would
+        exhaust memory.  Returns all per-shot integrated IQ values.
+        """
+        config = self._acquisition_config(n_average=n_average)
+        dc_flag = (
+            self.remove_dc_offset
+            if remove_dc_offset is None
+            else bool(remove_dc_offset)
+        )
+        pipeline = self._demodulation_pipeline(remove_dc_offset=dc_flag)
+        all_shots = np.empty(config.records_per_acquisition, dtype=np.complex128)
+        cursor = 0
+
+        def handle_buffer(chunk: CaptureData) -> None:
+            nonlocal cursor
+            demod = pipeline.process_capture(
+                chunk,
+                signal_channel=self.adc_channel,
+                reference_channel=self.reference_channel,
+                compute_fir=compute_fir,
+            )
+            count = demod.shots_iq.size
+            all_shots[cursor : cursor + count] = demod.shots_iq
+            cursor += count
+            if on_chunk is not None:
+                on_chunk(demod)
+
+        self._prepare_awg_for_capture()
+        try:
+            self.alazar.stream_capture(
+                config,
+                handle_buffer,
+                start_callback=lambda: self.awg.run(wait_until_ready=False),
+            )
+        finally:
+            with suppress(Exception):
+                self.awg.stop()
+        return all_shots
 
     def close(self) -> None:
         self.awg.close()

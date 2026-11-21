@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -11,7 +12,7 @@ import numpy.typing as npt
 
 from .transport import ScpiTransport, open_visa_transport
 from .models import AWGProgram, UploadedProgram
-from ..timeline import (
+from .timeline import (
     Parallel,
     Timeline,
     Waveform,
@@ -359,15 +360,32 @@ class AWG5208:
         uploaded: dict[int, list[str]] = {
             channel: [] for channel in sorted(expected_channels)
         }
+        uploaded_by_digest: dict[bytes, str] = {}
         for step_index, step in enumerate(program.steps):
             for channel in sorted(expected_channels):
                 markers = tuple(step.markers.get(channel, ()))
-                waveform_name = self.upload_waveform_asset(
-                    name=f"{program.name}_s{step_index:04d}_ch{channel}",
-                    waveform_volts=step.waveforms[channel],
-                    amplitude_vpp=float(program.amplitudes_vpp[channel]),
-                    markers=markers,
-                )
+                amplitude = float(program.amplitudes_vpp[channel])
+                wave_arr = np.ascontiguousarray(
+                    step.waveforms[channel], dtype=np.float64
+                ).reshape(-1)
+                digest = hashlib.blake2b(digest_size=16)
+                digest.update(f"{amplitude:.17g}".encode("ascii"))
+                digest.update(str(wave_arr.size).encode("ascii"))
+                digest.update(wave_arr.tobytes())
+                digest.update(str(len(markers)).encode("ascii"))
+                for marker in markers:
+                    m_arr = np.ascontiguousarray(marker, dtype=np.bool_).reshape(-1)
+                    digest.update(m_arr.tobytes())
+                key = digest.digest()
+                waveform_name = uploaded_by_digest.get(key)
+                if waveform_name is None:
+                    waveform_name = self.upload_waveform_asset(
+                        name=f"{program.name}_s{step_index:04d}_ch{channel}",
+                        waveform_volts=wave_arr,
+                        amplitude_vpp=amplitude,
+                        markers=markers,
+                    )
+                    uploaded_by_digest[key] = waveform_name
                 uploaded[channel].append(waveform_name)
 
         for channel in sorted(expected_channels):
