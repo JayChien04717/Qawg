@@ -5,7 +5,7 @@ terminated); AWG marker -> TRIG IN.  Expected: CHB shows the tone, CHA only
 noise.  If CHA shows the tone instead, the DMA channel order differs from the
 assumed layout (record, channel, sample) and ``copy_dma_buffer`` must change.
 
-Run from the repository root:  python testfolder/check_dual_channel.py
+Run from the repository root:  python tests/hardware/check_dual_channel.py
 """
 
 import numpy as np

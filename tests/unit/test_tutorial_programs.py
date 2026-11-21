@@ -8,7 +8,7 @@ import pytest
 
 from QAWG import ExperimentProgram, LinearSweep, MHz, ValuesSweep, ns, us
 
-TUTORIAL = Path(__file__).resolve().parents[1] / "QAWG_TUTORIAL_ZH.md"
+TUTORIAL = Path(__file__).resolve().parents[2] / "QAWG_TUTORIAL_ZH.md"
 
 DISPERSIVE_CFG = dict(
     ro_len=1 * us, ro_if=50 * MHz, ro_gain=0.3, qubit_if=100 * MHz, pi_gain=0.5,

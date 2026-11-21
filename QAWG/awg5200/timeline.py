@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -54,6 +54,48 @@ class Timeline:
             return NotImplemented
         return Timeline(self.items + (other,))
 
+    def plot(
+        self,
+        sample_rate_hz: float,
+        total_duration_s: float = 5e-6,
+        *,
+        minimum_samples: int = MIN_WAVEFORM_SAMPLES,
+        modulate: bool = True,
+        phase_reference: str = "global",
+        backend: Literal["matplotlib", "plotly"] = "matplotlib",
+        show: bool = False,
+        title: str | None = None,
+    ) -> Any:
+        """Plot rendered channel waveforms for this timeline."""
+        return plot_timeline(
+            self,
+            sample_rate_hz,
+            total_duration_s=total_duration_s,
+            minimum_samples=minimum_samples,
+            modulate=modulate,
+            phase_reference=phase_reference,
+            backend=backend,
+            show=show,
+            title=title,
+        )
+
+    def plot_schedule(
+        self,
+        sample_rate_hz: float,
+        *,
+        backend: Literal["matplotlib", "plotly"] = "matplotlib",
+        show: bool = False,
+        title: str | None = None,
+    ) -> Any:
+        """Plot a Gantt-style pulse schedule across channels."""
+        return plot_schedule(
+            self,
+            sample_rate_hz,
+            backend=backend,
+            show=show,
+            title=title,
+        )
+
 
 def waveform(
     waveform_array: npt.ArrayLike,
@@ -63,6 +105,10 @@ def waveform(
     name: str | None = None,
     gain: float = 1.0,
 ) -> Waveform:
+    if name is None:
+        inferred = getattr(waveform_array, "name", None)
+        if isinstance(inferred, str) and inferred:
+            name = inferred
     envelope = np.asarray(waveform_array, dtype=np.float64).reshape(-1) * gain
     if envelope.size < 1:
         raise ValueError("waveform_array cannot be empty")
@@ -247,6 +293,176 @@ def channel_names(timeline: Timeline | Waveform | Parallel) -> dict[int, str]:
     }
 
 
+# --- Visualization helpers inspired by QuantumCompilerV2 (waveform.py / symbol.py Gate.plot) ---
+
+
+def plot_timeline(
+    timeline: Timeline | Waveform | Parallel,
+    sample_rate_hz: float,
+    total_duration_s: float = 5e-6,
+    *,
+    minimum_samples: int = MIN_WAVEFORM_SAMPLES,
+    modulate: bool = True,
+    phase_reference: str = "global",
+    backend: Literal["matplotlib", "plotly"] = "matplotlib",
+    show: bool = False,
+    title: str | None = None,
+) -> Any:
+    """Plot rendered waveforms for all channels in a timeline."""
+    channels = _render_channels(
+        timeline,
+        sample_rate_hz,
+        total_duration_s,
+        minimum_samples,
+        modulate=modulate,
+        phase_reference=phase_reference,
+    )
+    names = channel_names(timeline)
+    first = next(iter(channels.values()))
+    time_ns = np.arange(first.size, dtype=np.float64) / sample_rate_hz * 1e9
+
+    if backend == "matplotlib":
+        from matplotlib import pyplot as plt
+
+        n_ch = len(channels)
+        fig, axes = plt.subplots(
+            n_ch, 1, sharex=True, figsize=(9, max(2.2 * n_ch, 3.0)), squeeze=False
+        )
+        axes_flat = axes[:, 0]
+        for ax, (ch, data) in zip(axes_flat, channels.items()):
+            label = f"CH{ch} ({names[ch]})" if ch in names else f"CH{ch}"
+            ax.plot(time_ns, data, label=label)
+            ax.set_ylabel("Voltage (V)")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="upper right")
+        axes_flat[-1].set_xlabel("Time (ns)")
+        if title:
+            fig.suptitle(title)
+        fig.tight_layout()
+        if show:
+            plt.show()
+        return fig, axes_flat
+
+    if backend == "plotly":
+        from plotly.graph_objects import Figure, Scatter
+
+        traces = [
+            Scatter(
+                x=time_ns,
+                y=data,
+                name=f"CH{ch} ({names[ch]})" if ch in names else f"CH{ch}",
+                mode="lines",
+            )
+            for ch, data in channels.items()
+        ]
+        fig = Figure(
+            traces,
+            {
+                "xaxis": {"title": "Time (ns)"},
+                "yaxis": {"title": "Voltage (V)"},
+                "title": title or "Timeline Waveforms",
+            },
+        )
+        if show:
+            fig.show()
+        return fig
+
+    raise ValueError("backend must be 'matplotlib' or 'plotly'")
+
+
+def plot_schedule(
+    timeline: Timeline | Waveform | Parallel,
+    sample_rate_hz: float,
+    *,
+    backend: Literal["matplotlib", "plotly"] = "matplotlib",
+    show: bool = False,
+    title: str | None = None,
+) -> Any:
+    """Plot a Gantt-style pulse schedule showing pulse start/stop per channel."""
+    if isinstance(timeline, (Waveform, Parallel)):
+        timeline = Timeline((timeline,))
+    scheduled = _scheduled_waveforms(timeline, sample_rate_hz)
+    channel_order = sorted({pulse.ch for pulse, _ in scheduled})
+    row_index = {ch: idx for idx, ch in enumerate(channel_order)}
+
+    if backend == "matplotlib":
+        from matplotlib import pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(9, max(1.2 * len(channel_order) + 1.0, 2.8)))
+        cmap = plt.get_cmap("tab10")
+        for idx, (pulse, start) in enumerate(scheduled):
+            start_ns = start / sample_rate_hz * 1e9
+            width_ns = pulse.envelope.size / sample_rate_hz * 1e9
+            y = row_index[pulse.ch]
+            color = cmap(idx % 10)
+            ax.barh(
+                y,
+                width_ns,
+                left=start_ns,
+                height=0.55,
+                color=color,
+                edgecolor="black",
+                alpha=0.8,
+            )
+            label = pulse.name or f"pulse_{idx}"
+            ax.text(
+                start_ns + width_ns / 2.0,
+                y,
+                label,
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="white",
+                clip_on=True,
+            )
+        ax.set_yticks(list(row_index.values()))
+        ax.set_yticklabels([f"CH{ch}" for ch in channel_order])
+        ax.set_xlabel("Time (ns)")
+        ax.set_title(title or "Pulse Schedule")
+        ax.grid(True, axis="x", alpha=0.3)
+        fig.tight_layout()
+        if show:
+            plt.show()
+        return fig, ax
+
+    if backend == "plotly":
+        from plotly.graph_objects import Bar, Figure
+
+        traces = []
+        for idx, (pulse, start) in enumerate(scheduled):
+            start_ns = start / sample_rate_hz * 1e9
+            width_ns = pulse.envelope.size / sample_rate_hz * 1e9
+            label = pulse.name or f"pulse_{idx}"
+            traces.append(
+                Bar(
+                    x=[width_ns],
+                    y=[f"CH{pulse.ch}"],
+                    base=[start_ns],
+                    orientation="h",
+                    name=label,
+                    hovertemplate=(
+                        f"{label}<br>CH{pulse.ch}<br>"
+                        f"start: {start_ns:.3g} ns<br>"
+                        f"duration: {width_ns:.3g} ns<extra></extra>"
+                    ),
+                )
+            )
+        fig = Figure(
+            traces,
+            {
+                "barmode": "overlay",
+                "xaxis": {"title": "Time (ns)"},
+                "yaxis": {"title": "Channel"},
+                "title": title or "Pulse Schedule",
+            },
+        )
+        if show:
+            fig.show()
+        return fig
+
+    raise ValueError("backend must be 'matplotlib' or 'plotly'")
+
+
 __all__ = [
     "Delay",
     "Parallel",
@@ -258,5 +474,7 @@ __all__ = [
     "delay",
     "delay_auto",
     "parallel",
+    "plot_schedule",
+    "plot_timeline",
     "waveform",
 ]

@@ -64,6 +64,46 @@ def sine(
     return offset_volts + amplitude_volts * np.sin(phase + phase_radians)
 
 
+# --- Ported from QuantumCompilerV2 (function.py) ---
+
+
+def cosine(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    frequency_hz: float,
+    amplitude_volts: float,
+    phase_radians: float = 0.0,
+    offset_volts: float = 0.0,
+) -> FloatArray:
+    if frequency_hz < 0 or frequency_hz > sample_rate_hz / 2:
+        raise ValueError("frequency_hz must be between DC and Nyquist")
+    phase = 2.0 * np.pi * frequency_hz * time_axis(
+        number_of_samples, sample_rate_hz
+    )
+    return offset_volts + amplitude_volts * np.cos(phase + phase_radians)
+
+
+def square(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    start_s: float,
+    flat_s: float,
+    amplitude_volts: float = 1.0,
+    offset_volts: float = 0.0,
+) -> FloatArray:
+    """Return a rectangular pulse high on ``[start_s, start_s + flat_s]``."""
+    if flat_s < 0:
+        raise ValueError("flat_s cannot be negative")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    active = (time >= start_s) & (time <= start_s + flat_s)
+    return np.where(active, offset_volts + amplitude_volts, offset_volts).astype(
+        np.float64
+    )
+
+
+# --- End QuantumCompilerV2 (function.py) ---
+
+
 def modulate_envelope(
     envelope: npt.ArrayLike,
     sample_rate_hz: float,
@@ -198,6 +238,109 @@ def exponential_decay(
         raise ValueError("time_constant_s must be positive")
     time = time_axis(number_of_samples, sample_rate_hz)
     return amplitude_volts * np.exp(-time / time_constant_s)
+
+
+# --- Ported from QuantumCompilerV2 (function.py) ---
+
+
+def exp_rising_pulse(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    peak_s: float,
+    time_constant_s: float,
+    amplitude_volts: float = 1.0,
+) -> FloatArray:
+    """Return a truncated rising exponential ``A * exp((t - peak_s) / tau)`` for ``t <= peak_s``."""
+    if time_constant_s <= 0:
+        raise ValueError("time_constant_s must be positive")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    out = np.zeros(number_of_samples, dtype=np.float64)
+    mask = time <= peak_s
+    out[mask] = amplitude_volts * np.exp((time[mask] - peak_s) / time_constant_s)
+    return out
+
+
+def exp_falling_pulse(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    peak_s: float,
+    time_constant_s: float,
+    amplitude_volts: float = 1.0,
+) -> FloatArray:
+    """Return a delayed falling exponential ``A * exp((peak_s - t) / tau)`` for ``t >= peak_s``."""
+    if time_constant_s <= 0:
+        raise ValueError("time_constant_s must be positive")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    out = np.zeros(number_of_samples, dtype=np.float64)
+    mask = time >= peak_s
+    out[mask] = amplitude_volts * np.exp((peak_s - time[mask]) / time_constant_s)
+    return out
+
+
+def exp_square(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    first_peak_s: float,
+    flat_s: float,
+    time_constant_s: float,
+    amplitude_volts: float = 1.0,
+) -> FloatArray:
+    """Return a flat-top pulse with exponential rising and falling edges."""
+    if time_constant_s <= 0:
+        raise ValueError("time_constant_s must be positive")
+    if flat_s < 0:
+        raise ValueError("flat_s cannot be negative")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    second_peak_s = first_peak_s + flat_s
+    out = np.ones(number_of_samples, dtype=np.float64)
+    rising = time < first_peak_s
+    falling = time > second_peak_s
+    out[rising] = np.exp((time[rising] - first_peak_s) / time_constant_s)
+    out[falling] = np.exp((second_peak_s - time[falling]) / time_constant_s)
+    return amplitude_volts * out
+
+
+def pwm(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    period_s: float,
+    duty_cycle: float = 0.5,
+    delay_s: float = 0.0,
+    on_value: float = 1.0,
+    off_value: float = 0.0,
+) -> FloatArray:
+    """Return a vectorized PWM waveform specified by ``duty_cycle`` in ``[0, 1]``."""
+    if period_s <= 0:
+        raise ValueError("period_s must be positive")
+    if not 0.0 <= duty_cycle <= 1.0:
+        raise ValueError("duty_cycle must be between 0 and 1")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    phase = np.mod(time - delay_s, period_s)
+    return np.where(phase <= duty_cycle * period_s, on_value, off_value).astype(
+        np.float64
+    )
+
+
+def pwm_width(
+    number_of_samples: int,
+    sample_rate_hz: float,
+    period_s: float,
+    on_duration_s: float,
+    delay_s: float = 0.0,
+    on_value: float = 1.0,
+    off_value: float = 0.0,
+) -> FloatArray:
+    """Return a vectorized PWM waveform specified by ``on_duration_s``."""
+    if period_s <= 0:
+        raise ValueError("period_s must be positive")
+    if on_duration_s < 0 or on_duration_s > period_s:
+        raise ValueError("on_duration_s must be between 0 and period_s")
+    time = time_axis(number_of_samples, sample_rate_hz)
+    phase = np.mod(time - delay_s, period_s)
+    return np.where(phase <= on_duration_s, on_value, off_value).astype(np.float64)
+
+
+# --- End QuantumCompilerV2 (function.py) ---
 
 
 def gaussian_cosine(

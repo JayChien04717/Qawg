@@ -9,7 +9,7 @@ Reports, per drive phase:
   * dominant periodicities of the phase series
   * radial vs tangential spread (phase jitter vs additive noise)
 
-Run from the repository root:  python testfolder/analyze_trigger_phase_jitter.py
+Run from the repository root:  python tests/hardware/analyze_trigger_phase_jitter.py
 """
 
 from __future__ import annotations

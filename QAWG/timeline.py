@@ -15,6 +15,8 @@ from .awg5200.timeline import (
     delay,
     delay_auto,
     parallel,
+    plot_schedule,
+    plot_timeline,
     waveform,
 )
 
@@ -29,5 +31,7 @@ __all__ = [
     "delay",
     "delay_auto",
     "parallel",
+    "plot_schedule",
+    "plot_timeline",
     "waveform",
 ]

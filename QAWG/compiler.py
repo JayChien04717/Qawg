@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import product
-from typing import Any, Protocol, Union
+from typing import Any, Literal, Protocol, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -13,11 +13,17 @@ from .awg5200.waveforms import (
     MIN_WAVEFORM_SAMPLES,
     constant,
     cosine_square,
+    exp_falling_pulse,
+    exp_rising_pulse,
+    exp_square,
     exponential_decay,
     exponential_rise,
     gaussian,
     gaussian_square,
     modulate_envelope,
+    pwm,
+    square,
+    time_axis,
 )
 
 ns = 1e-9
@@ -150,6 +156,12 @@ class PulseDefinition:
     edge_sigma_s: ValueExpression | None = None
     edge_length_s: ValueExpression | None = None
     decay_s: ValueExpression | None = None
+    peak_s: ValueExpression | None = None
+    flat_s: ValueExpression | None = None
+    start_s: ValueExpression | None = None
+    period_s: ValueExpression | None = None
+    duty_cycle: ValueExpression | None = None
+    custom_envelope: Any = None
     is_readout: bool = False
 
 
@@ -186,6 +198,11 @@ class ScheduledPulse:
     edge_sigma_s: float | None
     edge_length_s: float | None
     decay_s: float | None
+    peak_s: float | None = None
+    flat_s: float | None = None
+    pulse_start_s: float | None = None
+    period_s: float | None = None
+    duty_cycle: float | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +294,114 @@ class CompiledExperiment:
 
     def preview(self, channel: int) -> npt.NDArray[np.float64]:
         return self.channel_waveforms[channel].copy()
+
+    # Visualization helper inspired by QuantumCompilerV2 (waveform.py / symbol.py)
+    def plot(
+        self,
+        step: int = 0,
+        *,
+        channels: list[int] | tuple[int, ...] | None = None,
+        include_marker: bool = True,
+        backend: Literal["matplotlib", "plotly"] = "matplotlib",
+        show: bool = False,
+        title: str | None = None,
+    ) -> Any:
+        """Plot rendered waveforms, readout window, and marker for one sweep step."""
+        if not 0 <= step < self.number_of_sequence_steps:
+            raise IndexError(
+                f"step {step} out of range for {self.number_of_sequence_steps} steps"
+            )
+        selected = (
+            sorted(self.channel_waveforms)
+            if channels is None
+            else list(channels)
+        )
+        first = self.channel_waveforms[selected[0]][step]
+        time_ns = np.arange(first.size, dtype=np.float64) / self.sample_rate_hz * 1e9
+        ro_start_ns, ro_stop_ns = self.readout_windows_s[step] * 1e9
+        coords = self.point_coordinates[step]
+        coord_text = ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in coords.items())
+        plot_title = title or (
+            f"{self.program_name} (step {step}: {coord_text})"
+            if coord_text
+            else f"{self.program_name} (step {step})"
+        )
+
+        if backend == "matplotlib":
+            from matplotlib import pyplot as plt
+
+            n_rows = len(selected) + (1 if include_marker else 0)
+            fig, axes = plt.subplots(
+                n_rows, 1, sharex=True, figsize=(9, max(2.0 * n_rows, 3.0)), squeeze=False
+            )
+            axes_flat = axes[:, 0]
+            for ax, ch in zip(axes_flat[: len(selected)], selected):
+                ax.plot(time_ns, self.channel_waveforms[ch][step], label=f"CH{ch}")
+                ax.axvspan(ro_start_ns, ro_stop_ns, color="gold", alpha=0.2, label="readout")
+                ax.set_ylabel("Voltage (V)")
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc="upper right")
+            if include_marker:
+                ax_m = axes_flat[-1]
+                ax_m.step(
+                    time_ns,
+                    self.marker_waveforms[step].astype(np.float64),
+                    where="post",
+                    color="tab:red",
+                    label=f"CH{self.readout.marker_channel} M{self.readout.marker_number}",
+                )
+                ax_m.set_ylabel("Marker")
+                ax_m.set_ylim(-0.1, 1.2)
+                ax_m.grid(True, alpha=0.3)
+                ax_m.legend(loc="upper right")
+            axes_flat[-1].set_xlabel("Time (ns)")
+            fig.suptitle(plot_title)
+            fig.tight_layout()
+            if show:
+                plt.show()
+            return fig, axes_flat
+
+        if backend == "plotly":
+            from plotly.graph_objects import Figure, Scatter
+
+            traces = [
+                Scatter(
+                    x=time_ns,
+                    y=self.channel_waveforms[ch][step],
+                    name=f"CH{ch}",
+                    mode="lines",
+                )
+                for ch in selected
+            ]
+            if include_marker:
+                traces.append(
+                    Scatter(
+                        x=time_ns,
+                        y=self.marker_waveforms[step].astype(np.float64),
+                        name=f"CH{self.readout.marker_channel} M{self.readout.marker_number}",
+                        mode="lines",
+                    )
+                )
+            fig = Figure(
+                traces,
+                {
+                    "xaxis": {"title": "Time (ns)"},
+                    "yaxis": {"title": "Amplitude (V / Marker)"},
+                    "title": plot_title,
+                },
+            )
+            fig.add_vrect(
+                x0=ro_start_ns,
+                x1=ro_stop_ns,
+                fillcolor="gold",
+                opacity=0.2,
+                line_width=0,
+            )
+            if show:
+                fig.show()
+            return fig
+
+        raise ValueError("backend must be 'matplotlib' or 'plotly'")
 
     def bind(self, hardware: ExperimentHardware) -> "CompiledExperiment":
         self._hardware = hardware
@@ -439,32 +564,56 @@ class ExperimentProgram:
         *,
         gen: str,
         style: str,
-        length: ValueLike,
-        frequency: ValueLike,
+        length: ValueLike | None = None,
+        frequency: ValueLike = 0.0,
         phase: ValueLike = 0.0,
         gain: ValueLike = 1.0,
         sigma: ValueLike | None = None,
         edge_sigma: ValueLike | None = None,
         edge_length: ValueLike | None = None,
         decay: ValueLike | None = None,
+        peak: ValueLike | None = None,
+        flat: ValueLike | None = None,
+        start: ValueLike | None = None,
+        period: ValueLike | None = None,
+        duty_cycle: ValueLike | None = None,
+        envelope: Any = None,
         readout: bool = False,
     ) -> None:
         if gen not in self.generators:
             raise KeyError(f"Generator {gen!r} is not declared")
         pulse_style = style.lower()
-        if pulse_style not in {
+        supported_styles = {
             "const",
             "gaussian",
             "gaussian_square",
             "cosine_square",
             "exponential_decay",
             "exponential_rise",
-        }:
+            "exp_rising_pulse",
+            "exp_falling_pulse",
+            "exp_square",
+            "square",
+            "pwm",
+            "custom",
+        }
+        if pulse_style not in supported_styles:
             raise ValueError(
-                "style must be 'const', 'gaussian', 'gaussian_square', "
-                "'cosine_square', 'exponential_rise', or "
-                "'exponential_decay'"
+                "Unsupported pulse style "
+                f"{style!r}; expected one of {sorted(supported_styles)}"
             )
+        if pulse_style == "custom":
+            if envelope is None:
+                raise ValueError("Custom pulses require an envelope (Shape, array, or callable)")
+            if length is None:
+                inferred_span = getattr(envelope, "span", None)
+                if inferred_span is None:
+                    raise ValueError(
+                        "Custom pulses require 'length' unless envelope is a Shape"
+                    )
+                length = float(inferred_span)
+        elif length is None:
+            raise ValueError(f"Pulse style {pulse_style!r} requires 'length'")
         self.pulses[name] = PulseDefinition(
             name=name,
             generator=gen,
@@ -481,6 +630,12 @@ class ExperimentProgram:
                 None if edge_length is None else as_expression(edge_length)
             ),
             decay_s=None if decay is None else as_expression(decay),
+            peak_s=None if peak is None else as_expression(peak),
+            flat_s=None if flat is None else as_expression(flat),
+            start_s=None if start is None else as_expression(start),
+            period_s=None if period is None else as_expression(period),
+            duty_cycle=None if duty_cycle is None else as_expression(duty_cycle),
+            custom_envelope=envelope,
             is_readout=bool(readout),
         )
 
@@ -772,6 +927,31 @@ class ExperimentProgram:
                             if definition.decay_s is None
                             else definition.decay_s.resolve(point)
                         ),
+                        peak_s=(
+                            None
+                            if definition.peak_s is None
+                            else definition.peak_s.resolve(point)
+                        ),
+                        flat_s=(
+                            None
+                            if definition.flat_s is None
+                            else definition.flat_s.resolve(point)
+                        ),
+                        pulse_start_s=(
+                            None
+                            if definition.start_s is None
+                            else definition.start_s.resolve(point)
+                        ),
+                        period_s=(
+                            None
+                            if definition.period_s is None
+                            else definition.period_s.resolve(point)
+                        ),
+                        duty_cycle=(
+                            None
+                            if definition.duty_cycle is None
+                            else definition.duty_cycle.resolve(point)
+                        ),
                     )
                 )
                 if event.at_s is None:
@@ -875,6 +1055,11 @@ class ExperimentProgram:
                 edge_sigma_s=pulse.edge_sigma_s,
                 edge_length_s=pulse.edge_length_s,
                 decay_s=pulse.decay_s,
+                peak_s=pulse.peak_s,
+                flat_s=pulse.flat_s,
+                pulse_start_s=pulse.pulse_start_s,
+                period_s=pulse.period_s,
+                duty_cycle=pulse.duty_cycle,
             )
             for pulse in point.pulses
         )
@@ -962,6 +1147,76 @@ class ExperimentProgram:
                 decay_s,
                 pulse.gain,
             )
+        # --- Additional pulse styles ported from QuantumCompilerV2 (function.py / waveform.py) ---
+        elif style in {"exp_rising_pulse", "exp_falling_pulse"}:
+            decay_s = pulse.decay_s
+            if decay_s is None or decay_s <= 0:
+                raise ValueError(
+                    f"{style!r} requires decay > 0 (the envelope tau)"
+                )
+            duration_s = pulse.stop_s - pulse.start_s
+            peak_s = (
+                (duration_s if style == "exp_rising_pulse" else 0.0)
+                if pulse.peak_s is None
+                else pulse.peak_s
+            )
+            fn = (
+                exp_rising_pulse
+                if style == "exp_rising_pulse"
+                else exp_falling_pulse
+            )
+            envelope = fn(count, sample_rate_hz, peak_s, decay_s, pulse.gain)
+        elif style == "exp_square":
+            decay_s = pulse.decay_s
+            if decay_s is None or decay_s <= 0:
+                raise ValueError("exp_square pulses require decay > 0")
+            duration_s = pulse.stop_s - pulse.start_s
+            flat_s = (
+                duration_s * 0.5 if pulse.flat_s is None else pulse.flat_s
+            )
+            first_peak_s = (
+                max(0.0, (duration_s - flat_s) / 2.0)
+                if pulse.peak_s is None
+                else pulse.peak_s
+            )
+            envelope = exp_square(
+                count, sample_rate_hz, first_peak_s, flat_s, decay_s, pulse.gain
+            )
+        elif style == "square":
+            duration_s = pulse.stop_s - pulse.start_s
+            start_s = 0.0 if pulse.pulse_start_s is None else pulse.pulse_start_s
+            flat_s = duration_s if pulse.flat_s is None else pulse.flat_s
+            envelope = square(
+                count, sample_rate_hz, start_s, flat_s, pulse.gain
+            )
+        elif style == "pwm":
+            period_s = pulse.period_s
+            if period_s is None or period_s <= 0:
+                raise ValueError("pwm pulses require period > 0")
+            duty = 0.5 if pulse.duty_cycle is None else pulse.duty_cycle
+            delay_s = 0.0 if pulse.pulse_start_s is None else pulse.pulse_start_s
+            envelope = pwm(
+                count,
+                sample_rate_hz,
+                period_s,
+                duty_cycle=duty,
+                delay_s=delay_s,
+                on_value=pulse.gain,
+                off_value=0.0,
+            )
+        elif style == "custom":
+            custom = pulse.definition.custom_envelope
+            if callable(custom):
+                raw_env = np.asarray(
+                    custom(time_axis(count, sample_rate_hz)), dtype=np.float64
+                ).reshape(-1)
+            else:
+                raw_env = np.asarray(custom, dtype=np.float64).reshape(-1)
+            if raw_env.size != count:
+                src_t = np.linspace(0.0, 1.0, raw_env.size)
+                dst_t = np.linspace(0.0, 1.0, count)
+                raw_env = np.interp(dst_t, src_t, raw_env)
+            envelope = raw_env * pulse.gain
         else:  # pragma: no cover - validated by add_pulse
             raise RuntimeError(f"Unsupported pulse style {style!r}")
 

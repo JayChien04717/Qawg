@@ -1,21 +1,19 @@
 # QAWG AWG5208
 
-`QAWG.awg5200` 負責 Tektronix AWG5208 的 waveform upload、marker、
-sequence 與 SCPI hardware control。這一層不處理 Alazar data，也不定義
-實驗 sweep 規則。
+`QAWG.awg5200` 負責 Tektronix AWG5208 的波形建立、`Shape` / `IQArray` 建構器、多通道 `Timeline` 排程、marker、sequence 與 SCPI hardware control。這一層獨立於 Alazar 擷取與高階實驗 sweep compiler，可單獨匯入使用。
 
-Timeline helper 的實作已搬到上層 `QAWG.timeline`，因為 timeline 是
-hardware-independent experiment-description layer，不是 AWG5208 driver
-boundary。`QAWG.awg5200` 仍 re-export timeline helpers 以維持舊程式相容。
+> `QAWG.timeline` 為 `QAWG.awg5200.timeline` 的相容匯出入口，新舊程式皆可直接從 `QAWG`、`QAWG.timeline` 或 `QAWG.awg5200` 匯入。
 
-## 模組責任
+## 模組架構
 
 ```text
 awg5200/
-├── waveforms.py  envelope、carrier modulation、marker 與 WFMX encoding
-├── timeline.py   compatibility re-export for QAWG.timeline
+├── waveforms.py  基本 envelope、載波調變、marker 與 WFMX encoding
+├── shape.py      Shape 波形代數/時域建構器、函數註冊表與 IQArray（移植自 QuantumCompilerV2）
+├── timeline.py   多通道 Timeline 排程、對齊與視覺化（plot / plot_schedule）
+├── models.py     AWGProgram、AWGStep 與 UploadedProgram 資料結構
 ├── driver.py     AWG5208 SCPI、upload、marker、sequence 與 playback
-└── transport.py  PyVISA transport boundary
+└── transport.py  PyVISA transport 介面
 ```
 
 ## 安裝
@@ -67,11 +65,30 @@ carrier frequency 與 phase。
 
 內建 envelope helpers：
 
-- `constant`
-- `gaussian`
-- `gaussian_square`
-- `cosine_square`
-- `triangle_ns`
+- QAWG 原生：`constant`、`sine`、`gaussian`、`gaussian_square`、`cosine_square`、`exponential_rise`、`exponential_decay`、`triangle`、`triangle_cosine`、`triangle_ns`
+- 移植自 **QuantumCompilerV2**：`cosine`、`square`、`exp_rising_pulse`、`exp_falling_pulse`、`exp_square`、`pwm`、`pwm_width`
+
+### `Shape` 波形建構器與 `IQArray`（移植自 QuantumCompilerV2）
+
+需要用數學運算或時域串接組裝複雜包絡時，可使用 `Shape`（所有操作皆回傳新物件，不修改原物件）：
+
+```python
+from QAWG.awg5200 import Shape, IQArray, register_shape
+
+fs = 2.5e9
+g = Shape("gaussian", {"peak_x": 50e-9, "sigma": 10e-9}, span=100e-9, sample_rate=fs, name="pi")
+drag_q = (0.1 * g.diff()).normalize(0.05)       # 數值微分（DRAG）
+seq = (0.2 * g) | (0.2 * g >> 20e-9)            # `|` 時間串接、`>>` 前補零、`<<` 後補零
+a, b = g.align_to(seq, mode="tail_to_tail")     # 非破壞性對齊
+
+g.plot(show=True)                               # 時域圖（backend="matplotlib" | "plotly"）
+g.plot_fft(show=True)                           # FFT 頻譜圖
+```
+
+- 支援運算：`+`、`-`、`*`、`/`、`//`、`**`、`%`、`-s`、`abs(s)`、`.reverse()`、`.roll(offset)`、`.diff(n)`、`.repeat(n)`、`.pad_const(...)`、`.modulate(...)`。
+- 透過 `@register_shape("my_name")` 可註冊自訂 `func(x, **kwargs)`。
+- `Shape` 實作 `__array__`，可直接傳給 `waveform(shape, fc=..., ch=...)` 或呼叫 `shape.to_waveform(...)`。
+- `IQArray(I + 1j * Q, Z0=50.0)` 提供 `vI`、`vQ`、`p`、`dBm`、`phase`、`scale_to_vp()`、`scale_to_dbm()`、`gain(dB)`、`phase_shift(rad)`、`iq_plot()`。
 
 ### Cosine-square
 
@@ -178,6 +195,13 @@ channel_envelopes = align_channel_envelopes(
     sample_rate_hz=2.5e9,
     total_duration_s=5e-6,
 )
+```
+
+也可以直接預覽所有 channel 的波形與脈衝排程甘特圖：
+
+```python
+timeline.plot(sample_rate_hz=2.5e9, total_duration_s=5e-6, show=True)
+timeline.plot_schedule(sample_rate_hz=2.5e9, backend="plotly", show=True)
 ```
 
 同一 channel 上的 parallel waveforms 會相加。使用者必須確保總 peak 不超過：

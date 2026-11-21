@@ -3,7 +3,7 @@
 這份教學從零開始，依序說明：
 
 1. [環境與基本概念](#0-環境與基本概念)
-2. [只用 AWG：做 waveform、上傳、marker](#1-只用-awg做-waveform上傳執行)
+2. [只用 AWG：做 waveform、`Shape` 建構器、上傳與預覽](#1-只用-awg做-waveform上傳執行)
 3. [只用 Alazar：擷取 readout waveform](#2-只用-alazar擷取-readout-waveform)
 4. [QAWG：用 Program 描述實驗](#3-qawg用-program-描述實驗)
 5. [Dispersive 實驗：one-tone、two-tone、Rabi、T1、Ramsey](#4-dispersive-實驗)
@@ -121,6 +121,36 @@ awg.run()
 
 一般實驗不建議手動處理 marker 與 sequence，交給第 3 節的 compiler。
 
+### 1.1 用 `Shape` 組合自訂波形、預覽與 `IQArray`（移植自 QuantumCompilerV2）
+
+若需要對波形做四則運算、微分（例如 DRAG pulse）、時域串接或補零，可以使用 `Shape`（所有操作皆回傳新物件，不會改動原變數）：
+
+```python
+from QAWG import Shape, IQArray, register_shape, parallel, delay_auto, waveform
+
+fs = 2.5e9
+g = Shape("gaussian", {"peak_x": 50e-9, "sigma": 10e-9}, span=100e-9, sample_rate=fs, name="drive")
+drag_q = (0.1 * g.diff()).normalize(0.05)          # 數值微分產生 DRAG Q 分量
+double_pulse = (0.2 * g) | (0.2 * g >> 20e-9)      # `|` 時域串接、`>>` 前補零延遲、`<<` 後補零
+aligned_a, aligned_b = g.align_to(double_pulse, mode="tail_to_tail")
+
+# 即時繪圖與頻譜檢查（支援 backend="matplotlib" 或 "plotly"）
+g.plot(show=True)
+g.plot_fft(show=True)
+
+# 直接放進 Timeline 並預覽所有 channel 波形與甘特排程圖
+tl = parallel(
+    waveform(double_pulse, fc=50e6, ch=2),
+    drag_q.to_waveform(fc=50e6, ch=4, phase_radians=1.5708, name="drag_q"),
+) / delay_auto(20e-9) / Shape("const", {"lv": 0.15}, span=400e-9, sample_rate=fs, name="ro").to_waveform(fc=100e6, ch=1)
+
+tl.plot(fs, total_duration_s=2e-6, show=True)
+tl.plot_schedule(fs, backend="plotly", show=True)
+```
+
+- **自訂波形註冊**：可用 `@register_shape("my_pulse")` 註冊 `def my_pulse(x, ...)`，之後即可用 `Shape("my_pulse", {...}, span=..., sample_rate=fs)` 呼叫。
+- **射頻功率換算（`IQArray`）**：`IQArray(I + 1j * Q, Z0=50.0)` 支援 `.dBm`、`.scale_to_vp(vp)`、`.scale_to_dbm(dbm)`、`.gain(dB)`、`.phase_shift(rad)`、`.iq_plot()`。
+
 ---
 
 ## 2. 只用 Alazar：擷取 readout waveform
@@ -229,7 +259,10 @@ ExperimentProgram → compile() → CompiledExperiment → acquire() → Experim
 | `add_pulse(name, gen, style, length, frequency, gain, ...)` | 登記 pulse（此時還不產生波形） |
 | `play(...)` / `delay_auto(...)` / `trigger("ro")` | 排程 |
 
-- `style`：`const`、`gaussian`（要 `sigma`）、`gaussian_square`（要 `edge_sigma`）、`cosine_square`（要 `edge_length`）、`exponential_rise`/`exponential_decay`（要 `decay`）。
+- `style`：
+  - QAWG 原生：`const`、`gaussian`（要 `sigma`）、`gaussian_square`（要 `edge_sigma`）、`cosine_square`（要 `edge_length`）、`exponential_rise`/`exponential_decay`（要 `decay`）。
+  - 移植自 **QuantumCompilerV2**：`exp_rising_pulse`/`exp_falling_pulse`（截斷式指數波，要 `decay`，可選 `peak`）、`exp_square`（要 `decay`，可選 `flat`/`peak`）、`square`（可選 `start`/`flat`）、`pwm`（要 `period`，可選 `duty_cycle`）、以及 **`custom`**（傳入 `Shape`、NumPy 陣列或 callable 作為 `envelope`，若為 `Shape` 可省略 `length`）。
+- 編譯後可先用 `compiled.plot(step=0, show=True)`（或 `backend="plotly"`）預覽各 channel 波形、readout 視窗與 trigger marker，再上傳到硬體。
 - `gain` 是滿幅比例（0–1），實際峰值 = `gain × amplitude_vpp / 2`。
 - `play("p", at=t)` 指定時間；不給 `at` 就接在前一個 pulse 後面；`delay_auto(d)` 空出 `d`。
 - 參數可以是數字，也可以是 sweep 變數，且支援 `+`、`-`（例如 `T_MAX - tau`）。
@@ -452,8 +485,8 @@ Echo：在中間插一個 π pulse，`tau/2` 用兩個相同的 sweep 變數相�
 
 ### 5.1 為什麼需要 CHB 參考通道
 
-用舊的 loopback 資料（`testfolder/single_shot_clock`，3000 shots，50 MHz IF）分析
-（腳本：`testfolder/analyze_trigger_phase_jitter.py`）：
+用舊的 loopback 資料（`tests/hardware/single_shot_clock`，3000 shots，50 MHz IF）分析
+（腳本：`tests/hardware/analyze_trigger_phase_jitter.py`）：
 
 - shot 之間的相位標準差是 **5.2°**，且相位分佈是平的、寬度剛好是 ±½ 個 ADC sample。
 - 這是 trigger 對 1 GS/s 取樣時脈的 sub-sample 量化，大小為 `360° × IF × 1 ns`（50 MHz → 18°/sample）。
@@ -593,7 +626,7 @@ power = (np.abs(sig) ** 2).mean(axis=0) - (np.abs(ref) ** 2).mean(axis=0)   # �
 
 ### 5.5 第一次上機：先驗證 CHB
 
-1. AWG ch3 送 50 MHz 參考音到 CHB，CHA 先不接；執行 `testfolder/check_dual_channel.py`。
+1. AWG ch3 送 50 MHz 參考音到 CHB，CHA 先不接；執行 `tests/hardware/check_dual_channel.py`。
    應該看到 CHB 有訊號、CHA 只有雜訊。若相反，表示 DMA 的通道排列與程式假設（每個 record 內先 A 後 B）不同，需要調整 `copy_dma_buffer`。
 2. 接上訊號後，檢查 `reference jitter std`（約 5°），並比較修正前後 CHA 的 IQ 散佈：修正後切向散佈應縮小到徑向雜訊的水準。
 

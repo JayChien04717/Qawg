@@ -164,3 +164,26 @@ timeline = qubit1 / delay(10e-9) / readout
 ```
 
 此時 Readout 在 Qubit 1 開始後 10 ns 開始。
+
+## 搭配 `Shape` 組合複雜包絡與預覽排程（移植自 QuantumCompilerV2）
+
+若需要對波形做四則運算、微分（例如 DRAG pulse）、時域串接或補零，可直接用 `Shape` 建立包絡再轉成 `waveform()`：
+
+```python
+from QAWG import Shape, delay_auto, parallel, waveform
+
+fs = 2.5e9
+g = Shape("gaussian", {"peak_x": 50e-9, "sigma": 10e-9}, span=100e-9, sample_rate=fs, name="qubit_I")
+drag_q = (0.1 * g.diff()).normalize(0.05)          # 微分產生 DRAG Q 分量
+double_drive = (0.2 * g) | (0.2 * g >> 20e-9)      # `|` 時域串接、`>>` 前補零
+
+w_i = waveform(double_drive, fc=50e6, ch=2, name="qubit_I")
+w_q = drag_q.to_waveform(fc=50e6, ch=4, phase_radians=1.5708, name="qubit_Q")
+ro = Shape("const", {"lv": 0.15}, span=500e-9, sample_rate=fs, name="readout").to_waveform(fc=100e6, ch=3)
+
+timeline = parallel(w_i, w_q) / delay_auto(20e-9) / ro
+
+# 預覽各 channel 時域波形與排程甘特圖（支援 matplotlib / plotly）
+timeline.plot(fs, total_duration_s=2e-6, show=True)
+timeline.plot_schedule(fs, backend="plotly", show=True)
+```

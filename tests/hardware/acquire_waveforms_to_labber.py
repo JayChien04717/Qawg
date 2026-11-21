@@ -19,7 +19,7 @@ from QAWG.instrument import RohdeSchwarzSGS100A
 
 AWG_RESOURCE = "TCPIP0::192.168.10.171::inst0::INSTR"
 SGS100A_ADDRESS = "192.168.10.90"
-OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputlabber"
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputlabber"
 WAVEFORM_NAMES = (
     "gaussian_square",
     "exponential_rise",

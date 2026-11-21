@@ -17,7 +17,7 @@ from QAWG.labber_demod import (
 from QAWG.labber_waveform_writer import read_trace
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "Rabi_Script.hdf5"
 OUTPUT_DIR = ROOT / "outputlabber"
 OUTPUT = OUTPUT_DIR / "Rabi_Script_FIR_demod.hdf5"
