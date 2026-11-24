@@ -8,12 +8,13 @@ QAWG 是用於 **Tektronix AWG5208** 與 **AlazarTech ATS9371** 的 host-side �
 
 | 文件 | 內容說明 |
 | :--- | :--- |
-| [QAWG_TUTORIAL_ZH.md](QAWG_TUTORIAL_ZH.md) | 從零開始的完整中文教學（AWG、Alazar、one/two-tone、Rabi、T1、Ramsey、Wigner） |
+| [TOMOGRAPHY_WIGNER_ZH.md](TOMOGRAPHY_WIGNER_ZH.md) | Tomography 與 Wigner Function 完整操作指南（CHB 相位參考、Emission、Temporal Mode、反捲積與 `tomo.py`） |
 | [QAWG/README.md](QAWG/README.md) | Experiment Compiler 詳細設計、timing 規則與 Labber HDF5 存檔說明 |
 | [QAWG/awg5200/README.md](QAWG/awg5200/README.md) | AWG5208 底層 driver、波形函數、`Shape` / `IQArray` 與 sequence 說明 |
 | [QAWG/awg5200/TIMELINE_TUTORIAL.md](QAWG/awg5200/TIMELINE_TUTORIAL.md) | 多通道 Timeline 排程與視覺化範例 |
 | [QAWG/alazar/README.md](QAWG/alazar/README.md) | ATS9371 擷取、解調、濾波與低階 DMA 說明 |
 | [demo.ipynb](demo.ipynb) | 互動式 Notebook 範例（TOF、length / delay sweep、single-shot 視覺化） |
+| [examples/shape_with_qawg_example.py](examples/shape_with_qawg_example.py) | `Shape` / `IQArray` 搭配 `Timeline` 與 `ExperimentProgram`（DRAG）完整可執行範例 |
 
 ---
 
@@ -252,7 +253,7 @@ experiment = AWGAlazar.connect(
 )
 ```
 
-詳細接線、emission 與 Wigner 流程請見 [QAWG_TUTORIAL_ZH.md](QAWG_TUTORIAL_ZH.md) 第 5 節。
+詳細接線、emission 與 Wigner 流程請見 [TOMOGRAPHY_WIGNER_ZH.md](TOMOGRAPHY_WIGNER_ZH.md)。
 
 ---
 
