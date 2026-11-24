@@ -9,6 +9,7 @@
 5. [Photon State Tomography 與 Wigner Function 重建](#5-photon-state-tomography-與-wigner-function-重建)
 6. [百萬級 Shots：Chunk Streaming 與 `tomo.py`](#6-百萬級-shotschunk-streaming-與-tomopy)
 7. [校準要點與限制](#7-校準要點與限制)
+8. [雜訊資料模擬與重建 Demo（離線驗證）](#8-雜訊資料模擬與重建-demo離線驗證)
 
 ---
 
@@ -315,3 +316,41 @@ python tomo.py analyze-hemt `
 - **Ideal ML vs Moment Deconvolution**：`heterodyne_ml_density_matrix` 假設理想 heterodyne（Husimi $Q$ 分佈），未內建 added noise 反捲積；有顯著放大器雜訊時請使用 `deconvolve_amplifier_moments` + `fit_density_matrix_from_moments`（或 `tomo.py analyze-hemt`）。
 - **Mode Matching 效率**：每發只投影單一 temporal mode，若 mode 形狀或 `start_sample` 與實際發光包絡不符，會直接損失等效量測效率。
 - **硬體規格限制**：ATS9371 擷取固定 1 GS/s、50 Ω、DC coupling、±400 mV；單次 `ExperimentProgram` 支援一個 `"ro"` readout。
+
+---
+
+## 8. 雜訊資料模擬與重建 Demo（離線驗證）
+
+在不連接實體儀器的情況下，可直接執行專案內建的雜訊模擬與 Wigner 重建腳本，驗證整個解調、相位穩定、動差反捲積與密度矩陣擬合流程：
+
+### 8.1 端對端 Transmon 含雜訊 Emission 與 Wigner 模擬
+
+- **主腳本**：[examples/simulate_transmon_wigner.py](examples/simulate_transmon_wigner.py)
+- **模擬內容**：$T_1 = 80\text{ ns}$ 的 1D waveguide transmon 發光訊號（$|0\rangle$、$|+\rangle$、$|1\rangle$），經過含雜訊 HEMT 放大鏈（$n_{\text{noise}} = 10$ photons、收集效率 $\eta = 0.90$）與 ATS9371 雙通道（ChA = 50 MHz IF emission、ChB = 相位參考音去除 sub-sample trigger jitter 與慢速 LO 漂移），完整執行：
+  1. 雙通道解調與 ChB 相位修正（`DemodulationPipeline`）
+  2. PCA temporal mode 萃取（`extract_temporal_mode`）與逐發投影（`project_temporal_mode`）
+  3. 高階複動差統計（`complex_moment_stats`）與放大器雜訊反捲積（`deconvolve_amplifier_moments`）
+  4. 密度矩陣擬合（`fit_density_matrix_from_moments`）與 2D Wigner function（`wigner_function`）
+
+執行方式（從 repo 根目錄）：
+
+```powershell
+python examples/simulate_transmon_wigner.py
+```
+
+輸出結果存放於 `examples/transmon_wigner_sim/`（含 `transmon_wigner_results.npz` 與 `summary.json`）：
+
+![Transmon 模擬時域波形與 PCA Mode](examples/transmon_wigner_sim/transmon_emission_data.png)
+
+![含雜訊 IQ 分佈、反捲積動差與 Wigner 重建](examples/transmon_wigner_sim/transmon_wigner_reconstruction.png)
+
+### 8.2 其他模擬與核心演算法檔案
+
+| 檔案 | 說明 |
+| :--- | :--- |
+| [docs/generate_tomography_tutorial.py](docs/generate_tomography_tutorial.py) | 產生雜訊/損耗對 Wigner 負值影響與 Fock cutoff 收斂模擬圖 |
+| [docs/tomography_tutorial_zh.html](docs/tomography_tutorial_zh.html) | 完整互動圖文版中文 Tomography 模擬報告 |
+| [docs/tomography_assets/](docs/tomography_assets) | 模擬輸出數據（`tomography_simulation_data.npz`、`simulation_summary.csv`）與圖表 |
+| [QAWG/tomography.py](QAWG/tomography.py) | 核心演算法模組（動差計算、雜訊反捲積、ML / 動差擬合、Wigner 計算） |
+| [tests/unit/test_tomography_transmon.py](tests/unit/test_tomography_transmon.py) | Transmon 含雜訊重建單元測試 |
+| [tests/unit/test_tomography_pipeline.py](tests/unit/test_tomography_pipeline.py) | Tomography pipeline 單元測試 |
